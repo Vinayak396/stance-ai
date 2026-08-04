@@ -1,0 +1,26 @@
+# ==============================
+# StanceAI Backend — Dependencies
+# ==============================
+
+# API Framework
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+
+# Data Validation
+pydantic==2.7.1
+
+# Image / Video Processing
+opencv-python==4.10.0.84
+numpy==1.26.4
+
+# ML Pose Estimation
+mediapipe==0.10.14
+
+# Oracle Database (thin client — no Instant Client needed)
+oracledb==2.3.0
+
+# File Upload Support (required for FastAPI multipart)
+python-multipart==0.0.9
+
+# CORS + WebSocket support (bundled with uvicorn[standard])
+websockets==12.0
