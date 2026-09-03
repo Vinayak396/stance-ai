@@ -1,0 +1,48 @@
+graph LR
+  User([Batter/User])
+  Camera([Camera Device])
+  MediaPipe([MediaPipe Runtime])
+  D1[(D1 ShotBenchmarks)]
+  D2[(D2 AnalysisSessions)]
+  D3[(D3 SessionAnomalies)]
+  Backend[[FastAPI Backend\nOptional Path]]
+  System[[StanceAI System]]
+
+  User -->|control actions\nstart/stop/upload/select| System
+  Camera -->|live frames| System
+  System -->|overlay + metrics + summary| User
+  System -->|frame inference request| MediaPipe
+  MediaPipe -->|landmarks| System
+  System <--> |benchmark read| D1
+  System <--> |session create/update| D2
+  System <--> |anomaly insert/query| D3
+  System -.->|optional websocket frame stream| Backend
+  Backend -.->|optional analyzed response| System
+
+  subgraph L1[DFD Level 1 - StanceAI Detailed Flow]
+    P1[P1 Input Capture]
+    P2[P2 Pose Inference]
+    P3[P3 Biomechanics Computation]
+    P4[P4 Benchmark Retrieval]
+    P5[P5 Session Lifecycle Persistence]
+    P6[P6 Anomaly Persistence]
+    P7[P7 Visualization and Feedback]
+    PB[P2B/P3B Backend Analyze Path\nOptional]
+
+    User -->|start/stop/upload/select shot type| P1
+    Camera -->|video stream / frame| P1
+    P1 -->|current frame| P2
+    P2 -->|inference call| MediaPipe
+    MediaPipe -->|landmarks (33)| P2
+    P2 -->|landmarks + shot_type| P3
+    P3 -->|joint angles + quality + deviation| P7
+    P4 <--> |read benchmark set by shot_type| D1
+    P4 -->|benchmark thresholds| P3
+    P1 -->|session start signal| P5
+    P5 <--> |create/update session stats| D2
+    P3 -->|flagged joint events| P6
+    P6 <--> |insert/query anomalies| D3
+    P7 -->|skeleton overlay + labels + summary| User
+    P2 -.->|optional frame stream| PB
+    PB -.->|optional server-side analyzed result| P7
+  end

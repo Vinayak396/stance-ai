@@ -1,0 +1,51 @@
+classDiagram
+  direction TB
+
+  class SupabaseClient {
+    +from(table)
+    +insert(payload)
+    +update(payload)
+    +select(columns)
+  }
+
+  class ShotBenchmarkEntity {
+    +int benchmark_id PK
+    +string shot_type
+    +string joint_name
+    +float optimal_angle_min
+    +float optimal_angle_max
+    +float warning_tolerance
+    +float critical_tolerance
+    +boolean is_active
+  }
+
+  class AnalysisSessionEntity {
+    +int session_id PK
+    +string user_identifier
+    +string shot_type
+    +string input_source
+    +int total_frames
+    +int flagged_frames
+    +float overall_score
+    +string session_status
+    +timestamptz started_at
+    +timestamptz completed_at
+  }
+
+  class SessionAnomalyEntity {
+    +int anomaly_id PK
+    +int session_id FK
+    +int benchmark_id FK
+    +int frame_number
+    +string joint_name
+    +float observed_angle
+    +float deviation_degrees
+    +string severity
+    +string feedback_message
+  }
+
+  SupabaseClient ..> AnalysisSessionEntity : manages
+  SupabaseClient ..> ShotBenchmarkEntity : queries
+  SupabaseClient ..> SessionAnomalyEntity : logs
+  AnalysisSessionEntity "1" o-- "*" SessionAnomalyEntity : contains
+  ShotBenchmarkEntity "1" <-- "0..*" SessionAnomalyEntity : references

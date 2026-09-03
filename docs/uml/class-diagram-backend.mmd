@@ -1,0 +1,68 @@
+classDiagram
+  direction TB
+
+  class usePoseStream {
+    +connect()
+    +sendFrame(base64)
+    +disconnect()
+  }
+
+  class FastAPIApp {
+    +health_check()
+    +analyze_frame(request)
+    +websocket_stream(ws)
+    -decode_image(base64)
+    -encode_frame_to_base64(frame)
+    -_compute_joint_angles(landmarks, shotType)
+  }
+
+  class ConnectionManager {
+    +connect(websocket)
+    +disconnect(websocket)
+    +broadcast(message)
+  }
+
+  class PoseProcessor {
+    +process_frame(frame, draw)
+    +close()
+    -_draw_landmarks(frame, landmarks)
+    -_extract_landmarks(results)
+  }
+
+  class BackendBiomechanics {
+    +calculate_joint_angle(a, b, c) float
+    +classify_angle_quality(jointName, angle, benchmark) Object
+    +compute_joint_angles(landmarks, shotType) Array
+  }
+
+  class LandmarkPoint {
+    +float x
+    +float y
+    +float z
+    +float visibility
+  }
+
+  class JointAngleResult {
+    +string joint_name
+    +float angle
+    +string quality
+    +float deviation
+    +string feedback
+  }
+
+  class PoseAnalysisResponse {
+    +bool pose_detected
+    +string shot_type
+    +LandmarkPoint[] landmarks
+    +JointAngleResult[] joint_angles
+    +string processed_frame_b64
+    +datetime timestamp
+  }
+
+  usePoseStream ..> FastAPIApp : streams to
+  FastAPIApp *-- ConnectionManager : manages
+  FastAPIApp ..> PoseProcessor : processes with
+  FastAPIApp ..> BackendBiomechanics : evaluates with
+  FastAPIApp ..> PoseAnalysisResponse : produces
+  PoseAnalysisResponse o-- "*" LandmarkPoint : contains
+  PoseAnalysisResponse o-- "*" JointAngleResult : contains

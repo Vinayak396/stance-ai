@@ -220,18 +220,28 @@
 /* ── Video Panel ─────────────────────────────────────────────────────── */
 
 .video-panel {
-  display: flex;
-  flex-direction: column;
+  position: relative;       /* anchor the absolute video-wrapper */
   overflow: hidden;
-  min-height: 0;            /* allow shrinking inside grid */
+  min-height: 0;
+  border-radius: var(--radius-lg);
 }
 
 .video-panel-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 12px 16px;
+  background: linear-gradient(
+    180deg,
+    rgba(7, 11, 20, 0.85) 0%,
+    rgba(7, 11, 20, 0.0)  100%
+  );
+  backdrop-filter: blur(0px);
 }
 
 .panel-title {
@@ -257,18 +267,28 @@
 }
 
 .video-wrapper {
-  position: relative;
-  flex: 1;
-  min-height: 0;            /* shrink to fit, not expand past column */
-  background: var(--bg-deep);
+  position: absolute;       /* fill the entire video-panel */
+  inset: 0;
+  background: #000;
   overflow: hidden;
 }
 
 .video-element {
+  position: absolute;   /* fill the video-wrapper exactly like the canvas overlay */
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /*
+   * object-fit: cover — video fills the panel with no black bars.
+   * SkeletonOverlay mirrors this exact crop math (cover offsets) so
+   * landmark positions always map correctly onto the visible frame.
+   */
+  object-fit: cover;
   display: block;
   background: #000;
 }
 
+/* video-placeholder sits inside the wrapper (which is now absolute) */
 .video-placeholder {
   position: absolute;
   inset: 0;
@@ -290,27 +310,55 @@
 }
 
 .video-panel-footer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 18px;
-  border-top: 1px solid var(--border-subtle);
+  padding: 10px 16px;
+  background: linear-gradient(
+    0deg,
+    rgba(7, 11, 20, 0.85) 0%,
+    rgba(7, 11, 20, 0.0)  100%
+  );
 }
 
-/* ── Metrics Panel ───────────────────────────────────────────────────── */
+/* ── Metrics Panel ─────────────────────────────────────────────────────── */
 
 .metrics-panel {
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding-top: 0;
-  overflow-y: auto;         /* scroll just the metrics column */
+  overflow-y: auto;         /* panel itself scrolls in dual mode */
+  overflow-x: hidden;
   min-height: 0;
   scrollbar-width: thin;
+  scrollbar-color: var(--border-medium) transparent;
 }
 
+/* The joint-angles card fills remaining height and scrolls internally */
 .metrics-card {
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;           /* Session + Legend cards don't stretch */
+}
+
+/* The first metrics-card (joint angles) gets the leftover space in single mode */
+.metrics-card:first-child {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.metrics-card:first-child .joint-list {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-medium) transparent;
 }
 
 .metrics-header {
@@ -384,9 +432,9 @@
 
 .range-bar {
   position: relative;
-  height: 4px;
+  height: 5px;
   background: var(--bg-elevated);
-  border-radius: 2px;
+  border-radius: 3px;
   overflow: visible;
 }
 
@@ -394,19 +442,46 @@
   position: absolute;
   top: 0;
   height: 100%;
-  background: rgba(0, 230, 118, 0.2);
-  border-radius: 2px;
+  background: rgba(0, 230, 118, 0.18);
+  border-radius: 3px;
+  transition: background 0.25s ease;
+}
+
+/* Zone glows brighter when marker sits inside it */
+.range-zone--lit {
+  background: rgba(0, 230, 118, 0.38);
+  box-shadow: 0 0 6px rgba(0, 230, 118, 0.25);
 }
 
 .range-marker {
   position: absolute;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 10px;
-  height: 10px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
-  border: 2px solid #fff;
-  transition: left 0.15s ease-out;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  /* Animate position, color, and glow together */
+  transition:
+    left        0.18s cubic-bezier(0.25, 0.8, 0.25, 1),
+    background  0.25s ease,
+    box-shadow  0.25s ease,
+    width       0.2s ease,
+    height      0.2s ease;
+}
+
+/* Optimal: larger dot + persistent green glow pulse */
+.range-marker--optimal {
+  width: 13px;
+  height: 13px;
+  border-color: rgba(255, 255, 255, 0.95);
+  animation: marker-optimal-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes marker-optimal-pulse {
+  0%   { box-shadow: 0 0 4px  2px rgba(0, 230, 118, 0.55); }
+  50%  { box-shadow: 0 0 10px 4px rgba(0, 230, 118, 0.85); }
+  100% { box-shadow: 0 0 4px  2px rgba(0, 230, 118, 0.55); }
 }
 
 /* ── Session Stats ───────────────────────────────────────────────────── */
@@ -500,3 +575,326 @@
     padding: 0 12px 12px;
   }
 }
+
+/* ── Dual Camera Layout ───────────────────────────────────────────────────── */
+
+/* Dashboard main grid in dual mode — video panel gets more room */
+.dashboard-main--dual {
+  grid-template-columns: 1fr 280px;
+}
+
+/* The dual-mode video-panel stretches to full height and holds both feeds */
+.dual-mode-panel {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+/* Root container inside the panel */
+.dual-camera-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* Top action bar: title + start-both / stop-both / swap buttons */
+.dual-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.dual-action-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Side-by-side feeds container */
+.dual-feeds-grid {
+  display: grid;
+  grid-template-columns: 1fr 2px 1fr;    /* feed | divider | feed */
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Glowing vertical divider between the two feeds */
+.cam-divider {
+  width: 2px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(61, 142, 240, 0.5) 30%,
+    rgba(124, 77, 255, 0.5) 70%,
+    transparent 100%
+  );
+  box-shadow: 0 0 8px rgba(61, 142, 240, 0.25);
+  flex-shrink: 0;
+}
+
+/* Per-camera panel */
+.camera-feed-panel {
+  position: relative;  /* anchor absolute children */
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 0;
+  border: none;
+  background: #000;
+  box-shadow: none;
+}
+
+/* Label bar floats at the top of each camera feed */
+.camera-label-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: linear-gradient(
+    180deg,
+    rgba(7, 11, 20, 0.90) 0%,
+    rgba(7, 11, 20, 0.0)  100%
+  );
+  gap: 6px;
+}
+
+.camera-label-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.camera-label-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.camera-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.camera-label-text {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cam-fps {
+  font-size: 0.7rem;
+}
+
+/* Device selector dropdown */
+.camera-device-select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  cursor: pointer;
+  max-width: 130px;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.camera-device-select:hover,
+.camera-device-select:focus {
+  border-color: var(--border-medium);
+  color: var(--text-primary);
+}
+
+.camera-device-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Extra-small button variant (single camera start/stop icons) */
+.btn-xs {
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+/* Video wrapper per camera — fills the entire panel */
+.camera-video-wrapper {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+/* Footer floats at the bottom of each camera feed */
+.camera-feed-footer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: linear-gradient(
+    0deg,
+    rgba(7, 11, 20, 0.85) 0%,
+    rgba(7, 11, 20, 0.0)  100%
+  );
+}
+
+/* Permission error banner inside dual panel */
+.dual-permission-error {
+  padding: 8px 16px;
+  background: rgba(255, 23, 68, 0.08);
+  border-bottom: 1px solid rgba(255, 23, 68, 0.25);
+  font-size: 0.78rem;
+  color: #ff1744;
+  flex-shrink: 0;
+}
+
+/* Dual metrics cards — full height, not clipped; panel scrolls */
+.dual-metrics-card {
+  flex: 0 0 auto;    /* natural height — panel scrolls */
+  overflow: visible; /* show full joint list */
+}
+
+/* Override: first-child flex:1 must NOT apply inside dual mode */
+.metrics-panel .dual-metrics-card:first-child {
+  flex: 0 0 auto;
+  min-height: unset;
+  overflow: visible;
+}
+
+.dual-metrics-card .joint-list {
+  /* no height cap; panel-level scroll handles it */
+  overflow: visible;
+}
+
+.dual-metrics-card .joint-name {
+  font-size: 0.62rem;
+}
+
+.dual-metrics-card .joint-angle {
+  font-size: 0.88rem;
+}
+
+/* ── Combined metrics card (dual-camera unified view) ─────────────────────── */
+
+/* Section divider rows — separate FRONT from SIDE data */
+.joint-source-divider {
+  list-style: none;
+  padding: 6px 14px 4px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-muted);
+  background: rgba(61, 142, 240, 0.05);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  margin-top: 4px;
+}
+
+.joint-source-divider--side {
+  background: rgba(124, 77, 255, 0.06);
+  border-top-color: rgba(124, 77, 255, 0.2);
+  border-bottom-color: rgba(124, 77, 255, 0.2);
+  color: rgba(124, 77, 255, 0.8);
+}
+
+/* Stride metric rows get a subtle left accent */
+.joint-row--stride {
+  border-left: 2px solid rgba(124, 77, 255, 0.4);
+  padding-left: 12px;
+}
+
+/* Tiny FRONT / SIDE source badge next to joint name */
+.joint-source-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  vertical-align: middle;
+  line-height: 1.6;
+}
+
+.joint-source-badge--front {
+  background: rgba(61, 142, 240, 0.15);
+  color: #3d8ef0;
+  border: 1px solid rgba(61, 142, 240, 0.25);
+}
+
+.joint-source-badge--side {
+  background: rgba(124, 77, 255, 0.15);
+  color: #9c6fff;
+  border: 1px solid rgba(124, 77, 255, 0.25);
+}
+
+/* Side-cam role badge in camera label bar */
+.side-cam-role-badge {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #9c6fff;
+  background: rgba(124, 77, 255, 0.12);
+  border: 1px solid rgba(124, 77, 255, 0.25);
+  border-radius: 3px;
+  padding: 1px 6px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+
+/* ── Responsive — dual camera ─────────────────────────────────────────────── */
+
+@media (max-width: 1100px) {
+  /* On narrower screens, stack feeds vertically */
+  .dual-feeds-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 2px 1fr;
+    overflow-y: auto;
+  }
+
+  .cam-divider {
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(61, 142, 240, 0.5) 30%,
+      rgba(124, 77, 255, 0.5) 70%,
+      transparent 100%
+    );
+  }
+}
+
+@media (max-width: 768px) {
+  .dashboard-main--dual {
+    grid-template-columns: 1fr;
+  }
+}
+

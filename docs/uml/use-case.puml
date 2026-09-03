@@ -1,0 +1,96 @@
+@startuml StanceAI Use Case Diagram
+
+left to right direction
+skinparam packageStyle rectangle
+
+' ── Actors ──────────────────────────────────────────────────────────
+actor "Batter / User"        as User
+actor "Coach / Analyst"      as Coach
+actor "Admin / Data Maint."  as Admin
+actor "Camera Device"        as Camera
+actor "MediaPipe Runtime"    as MediaPipe
+actor "Supabase Service"     as Supabase
+
+' ── System Boundary (package = StarUML compatible) ───────────────────
+package "StanceAI Platform" {
+
+  ' Primary user-facing use cases
+  usecase "Start Live Analysis"            as StartLive
+  usecase "Upload Video for Analysis"      as UploadVideo
+  usecase "Upload Image for Analysis"      as UploadImage
+  usecase "Select Shot Type"              as SelectShot
+  usecase "View Joint Angles & Quality"  as ViewAngles
+  usecase "View Session Summary"          as Summary
+  usecase "Stop / End Session"            as Stop
+  usecase "View Recent Sessions"          as ViewRecent
+
+  ' Included / system-level use cases
+  usecase "Retrieve Benchmarks"           as Benchmarks
+  usecase "Start Analysis Session Record" as StartSession
+  usecase "End Analysis Session Record"   as EndSession
+  usecase "Log Biomechanical Anomaly"     as LogAnomaly
+  usecase "Get Session Anomalies"         as GetAnomalies
+  usecase "Pose Inference"                as PoseInference
+  usecase "Biomechanics Computation"      as BioComp
+
+  ' Admin use cases
+  usecase "Import / Update Benchmark Dataset" as ImportBenchmarks
+
+}
+
+' ── Actor associations ───────────────────────────────────────────────
+User      --> StartLive
+User      --> UploadVideo
+User      --> UploadImage
+User      --> SelectShot
+User      --> ViewAngles
+User      --> Summary
+User      --> Stop
+
+Coach     --> ViewAngles
+Coach     --> Summary
+Coach     --> ViewRecent
+Coach     --> GetAnomalies
+
+Admin     --> ImportBenchmarks
+
+Camera    --> StartLive
+MediaPipe --> PoseInference
+Supabase  --> Benchmarks
+Supabase  --> StartSession
+Supabase  --> EndSession
+Supabase  --> LogAnomaly
+Supabase  --> GetAnomalies
+Supabase  --> ViewRecent
+Supabase  --> ImportBenchmarks
+
+' ── Include relationships ────────────────────────────────────────────
+StartLive   .> StartSession  : <<include>>
+StartLive   .> Benchmarks    : <<include>>
+UploadVideo .> Benchmarks    : <<include>>
+UploadImage .> Benchmarks    : <<include>>
+Stop        .> EndSession    : <<include>>
+ViewAngles  .> PoseInference : <<include>>
+ViewAngles  .> BioComp       : <<include>>
+Summary     .> GetAnomalies  : <<include>>
+
+' ── Extend relationships ─────────────────────────────────────────────
+BioComp     .> LogAnomaly    : <<extend>>
+
+' ── Implementation notes ─────────────────────────────────────────────
+' StartLive        -> usePoseDetection.startCamera()
+' UploadVideo      -> Dashboard.handleFileUpload -> startFromVideoElement()
+' UploadImage      -> Dashboard.handleFileUpload -> analyzeImage()
+' SelectShot       -> Dashboard setShotType + getBenchmarks(shotType)
+' ViewAngles       -> SkeletonOverlay + JointAngle metrics panel
+' Summary          -> Dashboard cards (frameCount, fps, overallScore)
+' Stop             -> stopCamera() + biomechanicsApi.endSession()
+' Benchmarks       -> biomechanicsApi.getBenchmarks()
+' StartSession     -> biomechanicsApi.startSession()
+' EndSession       -> biomechanicsApi.endSession()
+' LogAnomaly       -> biomechanicsApi.logAnomaly()
+' GetAnomalies     -> biomechanicsApi.getSessionAnomalies()
+' ViewRecent       -> biomechanicsApi.getRecentSessions()
+' ImportBenchmarks -> frontend/import_benchmarks.js (Admin CLI)
+
+@enduml

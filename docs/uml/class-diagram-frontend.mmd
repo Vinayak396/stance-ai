@@ -1,0 +1,65 @@
+classDiagram
+  direction TB
+
+  class Dashboard {
+    +string shotType
+    +number sessionId
+    +Object dbBenchmarks
+    +startStream()
+    +stopStream()
+    +handleFileUpload(file)
+    +reanalyzeUpload()
+    -setShotType(type)
+    -setSessionStats(stats)
+  }
+
+  class usePoseDetection {
+    +boolean isModelReady
+    +boolean isRunning
+    +Array landmarks
+    +Array jointAngles
+    +number fps
+    +number frameCount
+    +startCamera(videoElement)
+    +startFromVideoElement(videoElement)
+    +analyzeImage(imageElement)
+    +stopCamera()
+    -detectLoop()
+    -createJointAngles(result)
+  }
+
+  class SkeletonOverlay {
+    +Array landmarks
+    +Array jointAngles
+    +render(landmarks, jointAngles)
+    -drawSkeleton(ctx, points)
+    -drawAngleLabels(ctx, jointAngles)
+  }
+
+  class biomechanics {
+    +calculateJointAngle(a, b, c) number
+    +classifyAngleQuality(angle, optMin, optMax, warnTol, critTol) Object
+    +computeJointAngles(landmarks, shotType, dbBenchmarks) Array
+  }
+
+  class biomechanicsApi {
+    +getBenchmarks(shotType) Promise
+    +startSession(userId, shotType, inputSource) Promise
+    +endSession(sessionId, stats) Promise
+    +logAnomaly(anomaly) Promise
+    +getSessionAnomalies(sessionId) Promise
+    +getRecentSessions(userId, limit) Promise
+  }
+
+  class SupabaseClient {
+    +from(table)
+    +insert(payload)
+    +update(payload)
+    +select(columns)
+  }
+
+  Dashboard ..> usePoseDetection : uses
+  Dashboard ..> SkeletonOverlay : renders with
+  Dashboard ..> biomechanicsApi : persists data
+  usePoseDetection ..> biomechanics : computes angles
+  biomechanicsApi ..> SupabaseClient : executes CRUD

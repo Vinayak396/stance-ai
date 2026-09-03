@@ -1,0 +1,184 @@
+@startuml StanceAI Class Diagram
+
+top to bottom direction
+skinparam packageStyle rectangle
+skinparam classAttributeIconSize 0
+
+' ── Tier 1: Frontend Architecture ────────────────────────────────────
+package "Frontend Client Architecture" {
+  class Dashboard {
+    +shotType: string
+    +sessionId: number
+    +dbBenchmarks: Object
+    +startStream()
+    +stopStream()
+    +handleFileUpload(file)
+    +reanalyzeUpload()
+    -setShotType(type)
+    -setSessionStats(stats)
+  }
+
+  class usePoseDetection {
+    +isModelReady: boolean
+    +isRunning: boolean
+    +landmarks: Array
+    +jointAngles: Array
+    +fps: number
+    +frameCount: number
+    +startCamera(videoElement)
+    +startFromVideoElement(videoElement)
+    +analyzeImage(imageElement)
+    +stopCamera()
+    -detectLoop()
+    -createJointAngles(result)
+  }
+
+  class SkeletonOverlay {
+    +landmarks: Array
+    +jointAngles: Array
+    +render(landmarks, jointAngles)
+    -drawSkeleton(ctx, points)
+    -drawAngleLabels(ctx, jointAngles)
+  }
+
+  class biomechanics {
+    +calculateJointAngle(a, b, c): number
+    +classifyAngleQuality(angle, optMin, optMax, warnTol, critTol): Object
+    +computeJointAngles(landmarks, shotType, dbBenchmarks): Array
+  }
+
+  class biomechanicsApi {
+    +getBenchmarks(shotType): Promise
+    +startSession(userId, shotType, inputSource): Promise
+    +endSession(sessionId, stats): Promise
+    +logAnomaly(anomaly): Promise
+    +getSessionAnomalies(sessionId): Promise
+    +getRecentSessions(userId, limit): Promise
+  }
+
+  class usePoseStream {
+    +connect()
+    +sendFrame(base64)
+    +disconnect()
+  }
+}
+
+' ── Tier 2: Backend Inference Service ─────────────────────────────────
+package "Backend Inference Service" {
+  class FastAPIApp {
+    +health_check()
+    +analyze_frame(request)
+    +websocket_stream(ws)
+    -decode_image(base64)
+    -encode_frame_to_base64(frame)
+    -_compute_joint_angles(landmarks, shotType)
+  }
+
+  class ConnectionManager {
+    +connect(websocket)
+    +disconnect(websocket)
+    +broadcast(message)
+  }
+
+  class PoseProcessor {
+    +process_frame(frame, draw)
+    +close()
+    -_draw_landmarks(frame, landmarks)
+    -_extract_landmarks(results)
+  }
+
+  class BackendBiomechanics {
+    +calculate_joint_angle(a, b, c): float
+    +classify_angle_quality(jointName, angle, benchmark): Object
+    +compute_joint_angles(landmarks, shotType): Array
+  }
+
+  class LandmarkPoint {
+    +x: float
+    +y: float
+    +z: float
+    +visibility: float
+  }
+
+  class JointAngleResult {
+    +joint_name: string
+    +angle: float
+    +quality: string
+    +deviation: float
+    +feedback: string
+  }
+
+  class PoseAnalysisResponse {
+    +pose_detected: bool
+    +shot_type: string
+    +landmarks: LandmarkPoint[]
+    +joint_angles: JointAngleResult[]
+    +processed_frame_b64: string
+    +timestamp: datetime
+  }
+}
+
+' ── Tier 3: Database Domain Entities ──────────────────────────────────
+package "Database Domain Entities" {
+  class SupabaseClient {
+    +from(table)
+    +insert(payload)
+    +update(payload)
+    +select(columns)
+  }
+
+  class ShotBenchmarkEntity {
+    +benchmark_id: int
+    +shot_type: string
+    +joint_name: string
+    +optimal_angle_min: float
+    +optimal_angle_max: float
+    +warning_tolerance: float
+    +critical_tolerance: float
+  }
+
+  class AnalysisSessionEntity {
+    +session_id: int
+    +user_identifier: string
+    +shot_type: string
+    +input_source: string
+    +total_frames: int
+    +flagged_frames: int
+    +overall_score: float
+    +session_status: string
+  }
+
+  class SessionAnomalyEntity {
+    +anomaly_id: int
+    +session_id: int
+    +benchmark_id: int
+    +frame_number: int
+    +observed_angle: float
+    +deviation_degrees: float
+    +severity: string
+  }
+}
+
+' ── Relationships ────────────────────────────────────────────────────
+Dashboard ..> usePoseDetection : uses
+Dashboard ..> SkeletonOverlay : renders with
+Dashboard ..> biomechanicsApi : persists data
+usePoseDetection ..> biomechanics : computes angles
+
+Dashboard ..> usePoseStream : optional stream
+usePoseStream ..> FastAPIApp : websocket route
+
+FastAPIApp *-- ConnectionManager
+FastAPIApp ..> PoseProcessor
+FastAPIApp ..> BackendBiomechanics
+FastAPIApp ..> PoseAnalysisResponse
+PoseAnalysisResponse o-- "*" LandmarkPoint
+PoseAnalysisResponse o-- "*" JointAngleResult
+
+biomechanicsApi ..> SupabaseClient : queries
+SupabaseClient ..> AnalysisSessionEntity : mutates
+
+AnalysisSessionEntity "1" *-- "0..*" SessionAnomalyEntity : contains
+ShotBenchmarkEntity "1" <-- "0..*" SessionAnomalyEntity : references
+
+@enduml

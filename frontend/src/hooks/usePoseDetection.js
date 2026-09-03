@@ -171,7 +171,12 @@ export function usePoseDetection({
   }, [videoRef, shotType, dbBenchmarks]);
 
   // ── Start camera ───────────────────────────────────────────────────────
-  const startCamera = useCallback(async () => {
+  /**
+   * @param {string|null} deviceId - Optional specific camera device ID.
+   *   When provided, opens that exact device (e.g. phone virtual webcam).
+   *   When omitted, falls back to facingMode:'user' (default laptop cam).
+   */
+  const startCamera = useCallback(async (deviceId = null) => {
     if (state.isRunning) return;
     if (!landmarkerRef.current) {
       dispatch({ type: 'ERROR', payload: 'Pose model not loaded yet. Please wait.' });
@@ -179,8 +184,15 @@ export function usePoseDetection({
     }
 
     try {
+      // Let the camera stream at its native resolution — no forced 640×480.
+      // Constraining width/height causes the browser to letterbox or crop
+      // the stream, which is what produces the black bars.
+      const videoConstraints = deviceId
+        ? { deviceId: { exact: deviceId } }
+        : { facingMode: 'user' };
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: 'user' },
+        video: videoConstraints,
         audio: false,
       });
 

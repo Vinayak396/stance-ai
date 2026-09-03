@@ -1,0 +1,95 @@
+%%{init: {'themeVariables': {'fontSize': '11px'}}}%%
+graph LR
+  classDef actor   fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
+  classDef usecase fill:#0f172a,stroke:#6366f1,color:#e2e8f0
+
+  %% ── Actors ──────────────────────────────────────────────────────────
+  User(["Batter / User"])
+  Coach(["Coach / Analyst"])
+  Admin(["Admin / Data\nMaintainer"])
+  Camera(["Camera Device"])
+  MediaPipe(["MediaPipe Runtime"])
+  Supabase(["Supabase Service"])
+
+  %% ── System Boundary ─────────────────────────────────────────────────
+  subgraph System["StanceAI Platform"]
+
+    %% Primary user-facing use cases
+    StartLive(("Start Live\nAnalysis"))
+    UploadVideo(("Upload Video\nfor Analysis"))
+    UploadImage(("Upload Image\nfor Analysis"))
+    SelectShot(("Select Shot Type"))
+    ViewAngles(("View Joint\nAngles & Quality"))
+    Summary(("View Session\nSummary"))
+    Stop(("Stop / End\nSession"))
+    ViewRecent(("View Recent\nSessions"))
+
+    %% Included / system-level use cases
+    Benchmarks(("Retrieve Benchmarks"))
+    StartSession(("Start Analysis\nSession Record"))
+    EndSession(("End Analysis\nSession Record"))
+    LogAnomaly(("Log Biomechanical\nAnomaly"))
+    GetAnomalies(("Get Session\nAnomalies"))
+    PoseInference(("Pose Inference"))
+    BioComp(("Biomechanics\nComputation"))
+
+    %% Admin use cases
+    ImportBenchmarks(("Import / Update\nBenchmark Dataset"))
+
+  end
+
+  %% ── Actor associations ───────────────────────────────────────────────
+  User --> StartLive
+  User --> UploadVideo
+  User --> UploadImage
+  User --> SelectShot
+  User --> ViewAngles
+  User --> Summary
+  User --> Stop
+
+  Coach --> ViewAngles
+  Coach --> Summary
+  Coach --> ViewRecent
+  Coach --> GetAnomalies
+
+  Admin --> ImportBenchmarks
+
+  Camera    --> StartLive
+  MediaPipe --> PoseInference
+  Supabase  --> Benchmarks
+  Supabase  --> StartSession
+  Supabase  --> EndSession
+  Supabase  --> LogAnomaly
+  Supabase  --> GetAnomalies
+  Supabase  --> ViewRecent
+  Supabase  --> ImportBenchmarks
+
+  %% ── Include / Extend ────────────────────────────────────────────────
+  StartLive   -.->|"«include»"| StartSession
+  StartLive   -.->|"«include»"| Benchmarks
+  UploadVideo -.->|"«include»"| Benchmarks
+  UploadImage -.->|"«include»"| Benchmarks
+  Stop        -.->|"«include»"| EndSession
+  ViewAngles  -.->|"«include»"| PoseInference
+  ViewAngles  -.->|"«include»"| BioComp
+  BioComp     -.->|"«extend»"| LogAnomaly
+  Summary     -.->|"«include»"| GetAnomalies
+
+  %% ── Implementation mapping ──────────────────────────────────────────
+  %% StartLive      → usePoseDetection.startCamera()
+  %% UploadVideo    → Dashboard.handleFileUpload → startFromVideoElement()
+  %% UploadImage    → Dashboard.handleFileUpload → analyzeImage()
+  %% SelectShot     → Dashboard setShotType + getBenchmarks(shotType)
+  %% ViewAngles     → SkeletonOverlay + JointAngle metrics panel
+  %% Summary        → Dashboard cards (frameCount, fps, overallScore)
+  %% Stop           → stopCamera() + biomechanicsApi.endSession()
+  %% Benchmarks     → biomechanicsApi.getBenchmarks()
+  %% StartSession   → biomechanicsApi.startSession()
+  %% EndSession     → biomechanicsApi.endSession()
+  %% LogAnomaly     → biomechanicsApi.logAnomaly()
+  %% GetAnomalies   → biomechanicsApi.getSessionAnomalies()
+  %% ViewRecent     → biomechanicsApi.getRecentSessions()
+  %% ImportBenchmarks → frontend/import_benchmarks.js (Admin CLI)
+
+  class User,Coach,Admin,Camera,MediaPipe,Supabase actor
+  class StartLive,UploadVideo,UploadImage,SelectShot,ViewAngles,Summary,Stop,ViewRecent,Benchmarks,StartSession,EndSession,LogAnomaly,GetAnomalies,PoseInference,BioComp,ImportBenchmarks usecase

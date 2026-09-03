@@ -1,0 +1,68 @@
+erDiagram
+  SHOT_BENCHMARKS {
+    uuid benchmark_id PK
+    varchar shot_type
+    varchar joint_name
+    varchar landmark_a
+    varchar landmark_b
+    varchar landmark_c
+    numeric optimal_angle_min
+    numeric optimal_angle_max
+    numeric tolerance_warning
+    numeric tolerance_critical
+    text source_reference
+    timestamptz created_at
+  }
+
+  ANALYSIS_SESSIONS {
+    uuid session_id PK
+    varchar user_identifier
+    varchar shot_type
+    varchar input_source
+    int total_frames
+    int flagged_frames
+    numeric overall_score
+    varchar status
+    timestamptz started_at
+    timestamptz completed_at
+  }
+
+  SESSION_ANOMALIES {
+    uuid anomaly_id PK
+    uuid session_id FK
+    uuid benchmark_id FK
+    int frame_number
+    numeric observed_angle
+    numeric deviation_degrees
+    varchar severity
+    text feedback_message
+    jsonb landmark_data
+    timestamptz created_at
+  }
+
+  ANALYSIS_SESSIONS ||--o{ SESSION_ANOMALIES : has
+  SHOT_BENCHMARKS ||--o{ SESSION_ANOMALIES : references
+
+  POSE_FRAME {
+    int frame_number
+    long timestamp_ms
+    int landmarks_count
+  }
+
+  LANDMARK_POINT {
+    int index
+    float x
+    float y
+    float z
+    float visibility
+  }
+
+  JOINT_MEASUREMENT {
+    string joint_name
+    float observed_angle
+    string quality
+    float deviation
+  }
+
+  POSE_FRAME ||--o{ LANDMARK_POINT : contains
+  POSE_FRAME ||--o{ JOINT_MEASUREMENT : produces
