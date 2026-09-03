@@ -1,13 +1,11 @@
-﻿/**
+/**
  * StanceAI - Biomechanics Engine (Browser)
  * Runs entirely in the browser - no server required.
  *
- * computeJointAngles    - front camera: standard joint angles
- * computeSideViewMetrics - side camera: ALL side-only insights:
- *     Stride / footwork  : STRIDE_LENGTH, WEIGHT_TRANSFER, BACK_FOOT_SHIFT
- *     Front-cam blindspots: HEAD_POSITION, LEAD_ELBOW_TUCK,
- *                           FRONT_KNEE_DRIVE, BACK_KNEE_DEPTH, HIP_CROUCH
- *     Always             : BODY_LEAN
+ * computeJointAngles        - front camera: standard joint angles (unchanged)
+ * computeSideViewMetrics     - side camera: ALL side-only insights (unchanged)
+ * analyzeCompletedShot       - NEW: segments a recorded frame buffer into 3 phases
+ *                              and returns per-phase metrics for the full shot.
  */
 
 export const LANDMARK_INDEX = {
@@ -41,6 +39,21 @@ export const JOINT_DEFINITIONS = [
   ['LEFT_SHOULDER', 'LEFT_ELBOW',    'LEFT_SHOULDER', 'LEFT_HIP'     ],
   ['RIGHT_SHOULDER','RIGHT_ELBOW',   'RIGHT_SHOULDER','RIGHT_HIP'    ],
 ];
+
+// ── Phase definitions ──────────────────────────────────────────────────────────
+// Which front-cam joint names are evaluated per phase.
+export const PHASE_JOINTS = {
+  STANCE:        new Set(['FRONT_KNEE','BACK_KNEE','FRONT_HIP','BACK_HIP','LEFT_SHOULDER','RIGHT_SHOULDER']),
+  STRIDE_SHOT:   new Set(['FRONT_ELBOW','BACK_ELBOW','FRONT_KNEE','BACK_KNEE','FRONT_HIP','BACK_HIP']),
+  FOLLOWTHROUGH: new Set(['FRONT_ELBOW','BACK_ELBOW','FRONT_HIP','LEFT_SHOULDER','RIGHT_SHOULDER','FRONT_KNEE']),
+};
+
+// Which side-cam metric names belong to each phase.
+export const PHASE_SIDE_METRICS = {
+  STANCE:        new Set(['HEAD_POSITION','HIP_CROUCH','BODY_LEAN']),
+  STRIDE_SHOT:   new Set(['STRIDE_LENGTH','WEIGHT_TRANSFER','BACK_FOOT_SHIFT','FRONT_KNEE_DRIVE','BACK_KNEE_DEPTH','LEAD_ELBOW_TUCK']),
+  FOLLOWTHROUGH: new Set(['BODY_LEAN','HIP_CROUCH','HEAD_POSITION']),
+};
 
 /**
  * INLINE_BENCHMARKS — per-shot benchmark ranges.
@@ -241,6 +254,44 @@ export function computeJointAngles(landmarks, shotType='COVER_DRIVE', dbBenchmar
 }
 
 /**
+ * computeJointAnglesForPhase
+ * ===========================
+ * Like computeJointAngles but only computes joints that belong to `phase`.
+ * Used by analyzeCompletedShot to produce phase-filtered metrics.
+ */
+export function computeJointAnglesForPhase(landmarks, phase, shotType='COVER_DRIVE', dbBenchmarks=null) {
+  const benchmarkMap = (dbBenchmarks&&Object.keys(dbBenchmarks).length>0)
+    ? dbBenchmarks : (INLINE_BENCHMARKS[shotType]??{});
+  const allowedJoints = PHASE_JOINTS[phase] ?? new Set();
+
+  const results = [];
+  for (const [jointName,lmA,lmB,lmC] of JOINT_DEFINITIONS) {
+    if (!allowedJoints.has(jointName)) continue;
+    const coordsA = getLandmarkCoords(landmarks,lmA);
+    const coordsB = getLandmarkCoords(landmarks,lmB);
+    const coordsC = getLandmarkCoords(landmarks,lmC);
+    if (!coordsA||!coordsB||!coordsC) continue;
+
+    const angle = calculateJointAngle(coordsA,coordsB,coordsC);
+    let quality='UNCLASSIFIED', deviation=0, optMin=null, optMax=null;
+    const bench = benchmarkMap[jointName];
+    if (bench) {
+      const [oMin,oMax,wTol,cTol]=bench;
+      optMin=oMin; optMax=oMax;
+      ({quality,deviation}=classifyAngleQuality(angle,oMin,oMax,wTol,cTol));
+    }
+    results.push({
+      jointName, landmarkA:lmA, landmarkB:lmB, landmarkC:lmC,
+      angleDegrees:Math.round(angle*100)/100,
+      quality, deviation:Math.round(deviation*100)/100,
+      optimalMin:optMin, optimalMax:optMax,
+      source:'FRONT',
+    });
+  }
+  return results;
+}
+
+/**
  * computeSideViewMetrics
  * ========================
  * Extracts ALL metrics only visible from the side camera (90 degrees to batsman).
@@ -410,6 +461,171 @@ export function computeSideViewMetrics(
   results.push(makeEntry('BODY_LEAN', leanDeg));
 
   return results;
+}
+
+/**
+ * computeSideViewMetricsForPhase
+ * ================================
+ * Like computeSideViewMetrics but filtered to metrics that belong to `phase`.
+ */
+export function computeSideViewMetricsForPhase(
+  landmarks, phase, shotType='COVER_DRIVE', handedness='RHB', flipSideCam=false, dbBenchmarks=null
+) {
+  const all = computeSideViewMetrics(landmarks, shotType, handedness, flipSideCam, dbBenchmarks);
+  const allowed = PHASE_SIDE_METRICS[phase] ?? new Set();
+  return all.filter(m => allowed.has(m.jointName));
+}
+
+// ── Frame velocity helpers ─────────────────────────────────────────────────────
+
+/**
+ * Compute per-frame wrist speed (normalised landmark units per millisecond).
+ * frameBuffer: Array of { landmarks, timestampMs }
+ * Returns Array<number> of the same length (first frame = 0).
+ */
+export function computeFrameVelocities(frameBuffer) {
+  const velocities = [0];
+  for (let i = 1; i < frameBuffer.length; i++) {
+    const prev = frameBuffer[i - 1];
+    const curr = frameBuffer[i];
+    const dt   = Math.max(curr.timestampMs - prev.timestampMs, 1);
+
+    const LW = LANDMARK_INDEX.LEFT_WRIST;
+    const RW = LANDMARK_INDEX.RIGHT_WRIST;
+
+    const lPrev = prev.landmarks[LW], lCurr = curr.landmarks[LW];
+    const rPrev = prev.landmarks[RW], rCurr = curr.landmarks[RW];
+
+    const lSpeed = (lPrev && lCurr)
+      ? Math.sqrt((lCurr.x-lPrev.x)**2 + (lCurr.y-lPrev.y)**2) / dt
+      : 0;
+    const rSpeed = (rPrev && rCurr)
+      ? Math.sqrt((rCurr.x-rPrev.x)**2 + (rCurr.y-rPrev.y)**2) / dt
+      : 0;
+
+    velocities.push((lSpeed + rSpeed) / 2);
+  }
+  return velocities;
+}
+
+/** Smooth a velocity array with a simple moving average (window = k frames). */
+function smoothVelocities(velocities, k = 5) {
+  const out = [];
+  for (let i = 0; i < velocities.length; i++) {
+    const start = Math.max(0, i - Math.floor(k / 2));
+    const end   = Math.min(velocities.length, start + k);
+    const slice = velocities.slice(start, end);
+    out.push(slice.reduce((a, b) => a + b, 0) / slice.length);
+  }
+  return out;
+}
+
+/**
+ * analyzeCompletedShot
+ * =====================
+ * Given the full rolling frame buffer for a completed shot, segments it into
+ * 3 phases using the wrist velocity profile and computes per-phase metrics.
+ *
+ * Phase segmentation:
+ *   STANCE        - frames before wrist velocity rises past 20% of peak
+ *   STRIDE_SHOT   - frames from velocity rise through peak (impact)
+ *   FOLLOWTHROUGH - frames after velocity drops below 20% of peak again
+ *
+ * @param {Array}   frameBuffer  - [{landmarks, timestampMs}]
+ * @param {string}  shotType
+ * @param {string}  [handedness='RHB']
+ * @param {boolean} [flipSideCam=false]
+ * @param {Object}  [dbBenchmarks=null]
+ * @returns analysis object or null if buffer too short
+ */
+export function analyzeCompletedShot(
+  frameBuffer,
+  shotType     = 'COVER_DRIVE',
+  handedness   = 'RHB',
+  flipSideCam  = false,
+  dbBenchmarks = null,
+) {
+  const n = frameBuffer.length;
+  if (n < 6) return null;
+
+  const rawVel = computeFrameVelocities(frameBuffer);
+  const vel    = smoothVelocities(rawVel, 5);
+
+  // Find peak velocity frame (impact)
+  let peakIdx = 0;
+  for (let i = 1; i < vel.length; i++) {
+    if (vel[i] > vel[peakIdx]) peakIdx = i;
+  }
+
+  const IDLE_THRESHOLD = 0.000_05;
+  const isRealShot = vel[peakIdx] > IDLE_THRESHOLD;
+
+  let stanceEnd, followStart;
+  if (isRealShot) {
+    const riseThresh = vel[peakIdx] * 0.20;
+    stanceEnd = peakIdx;
+    for (let i = peakIdx - 1; i >= 0; i--) {
+      if (vel[i] < riseThresh) { stanceEnd = i; break; }
+    }
+    const fallThresh = vel[peakIdx] * 0.20;
+    followStart = peakIdx;
+    for (let i = peakIdx + 1; i < n; i++) {
+      if (vel[i] < fallThresh) { followStart = i; break; }
+    }
+    if (followStart === peakIdx) followStart = Math.min(n - 1, peakIdx + 3);
+  } else {
+    peakIdx     = Math.floor(n * 0.50);
+    stanceEnd   = Math.floor(n * 0.30);
+    followStart = Math.floor(n * 0.70);
+  }
+
+  // Pick representative frames
+  let stanceFrameIdx = 0;
+  let minV = Infinity;
+  for (let i = 0; i <= stanceEnd; i++) {
+    if (vel[i] < minV) { minV = vel[i]; stanceFrameIdx = i; }
+  }
+  const shotFrameIdx   = peakIdx;
+  const followFrameIdx = Math.min(n - 1, Math.floor((followStart + n - 1) / 2));
+
+  const stanceFrame = frameBuffer[stanceFrameIdx];
+  const shotFrame   = frameBuffer[shotFrameIdx];
+  const followFrame = frameBuffer[followFrameIdx];
+
+  // Compute phase metrics
+  const stanceMetrics = computeJointAnglesForPhase(
+    stanceFrame.landmarks, 'STANCE', shotType, dbBenchmarks
+  );
+  const shotMetrics = computeJointAnglesForPhase(
+    shotFrame.landmarks, 'STRIDE_SHOT', shotType, dbBenchmarks
+  );
+  const followMetrics = computeJointAnglesForPhase(
+    followFrame.landmarks, 'FOLLOWTHROUGH', shotType, dbBenchmarks
+  );
+
+  // Overall quality summary
+  const allMetrics = [...stanceMetrics, ...shotMetrics, ...followMetrics];
+  const total   = allMetrics.length;
+  const optimal = allMetrics.filter(m => m.quality === 'OPTIMAL').length;
+  const warning = allMetrics.filter(m => m.quality === 'WARNING').length;
+  const critical= allMetrics.filter(m => m.quality === 'CRITICAL').length;
+
+  return {
+    phases: {
+      STANCE:        stanceMetrics,
+      STRIDE_SHOT:   shotMetrics,
+      FOLLOWTHROUGH: followMetrics,
+    },
+    frameIndices:         { stanceFrameIdx, shotFrameIdx, followFrameIdx },
+    representativeFrames: {
+      stance:        stanceFrame.landmarks,
+      stride_shot:   shotFrame.landmarks,
+      followthrough: followFrame.landmarks,
+    },
+    overallQuality: { total, optimal, warning, critical },
+    velocityProfile: vel,
+    peakVelocity:   vel[peakIdx],
+  };
 }
 
 // Legacy alias kept for any future direct callers

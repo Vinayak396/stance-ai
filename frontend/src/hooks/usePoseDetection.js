@@ -25,21 +25,32 @@
 
 import { useEffect, useRef, useCallback, useReducer } from 'react';
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
-import { computeJointAngles } from '../lib/biomechanics.js';
+import { computeJointAngles, analyzeCompletedShot } from '../lib/biomechanics.js';
 
 // ─── MediaPipe model path (served from CDN) ────────────────────────────────
-const WASM_CDN    = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
-const MODEL_URL   = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task';
+const WASM_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
+const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task';
+
+// ─── Shot detection thresholds ─────────────────────────────────────────────
+// (normalised landmark units per millisecond)
+const SHOT_START_THRESHOLD = 0.001_8;  // wrist speed that marks shot start
+const SHOT_END_THRESHOLD = 0.000_6;  // wrist speed that marks shot end
+const COOLDOWN_FRAMES = 18;        // consecutive low-vel frames to confirm shot ended
+const MAX_BUFFER_FRAMES = 180;       // ~6 s @ 30 fps
 
 // ─── State ─────────────────────────────────────────────────────────────────
 const INITIAL_STATE = {
-  isModelReady:  false,
-  isRunning:     false,
-  error:         null,
-  landmarks:     [],      // raw MediaPipe landmark objects
-  jointAngles:   [],      // computed JointAngleResult[]
-  fps:           0,
-  frameCount:    0,
+  isModelReady: false,
+  isRunning: false,
+  error: null,
+  landmarks: [],      // raw MediaPipe landmark objects
+  jointAngles: [],      // computed JointAngleResult[] (live frame)
+  fps: 0,
+  frameCount: 0,
+  // 3-phase shot analysis (null until a complete shot is detected)
+  shotAnalysis: null,
+  // Countdown seconds remaining before auto-reset (null when no analysis)
+  resetCountdown: null,
 };
 
 function reducer(state, action) {
@@ -55,22 +66,31 @@ function reducer(state, action) {
     case 'POSE_DATA':
       return {
         ...state,
-        landmarks:   action.payload.landmarks,
+        landmarks: action.payload.landmarks,
         jointAngles: action.payload.jointAngles,
-        fps:         action.payload.fps,
-        frameCount:  state.frameCount + 1,
+        fps: action.payload.fps,
+        frameCount: state.frameCount + 1,
       };
     // Static image result — show data but keep isRunning false
     case 'IMAGE_ANALYZED':
       return {
         ...state,
-        isRunning:   false,
-        error:       action.payload.error ?? null,
-        landmarks:   action.payload.landmarks  ?? [],
+        isRunning: false,
+        error: action.payload.error ?? null,
+        landmarks: action.payload.landmarks ?? [],
         jointAngles: action.payload.jointAngles ?? [],
-        fps:         0,
-        frameCount:  action.payload.landmarks?.length ? state.frameCount + 1 : state.frameCount,
+        fps: 0,
+        frameCount: action.payload.landmarks?.length ? state.frameCount + 1 : state.frameCount,
       };
+    case 'SHOT_ANALYZED':
+      return { ...state, shotAnalysis: action.payload, resetCountdown: 5 };
+    case 'COUNTDOWN_TICK':
+      return {
+        ...state,
+        resetCountdown: state.resetCountdown !== null ? Math.max(0, state.resetCountdown - 1) : null,
+      };
+    case 'RESET_SHOT':
+      return { ...state, shotAnalysis: null, resetCountdown: null };
     default:
       return state;
   }
@@ -85,17 +105,25 @@ function reducer(state, action) {
  * @param {React.RefObject} options.videoRef  - Ref to the <video> element
  */
 export function usePoseDetection({
-  shotType     = 'COVER_DRIVE',
+  shotType = 'COVER_DRIVE',
   dbBenchmarks = null,
   videoRef,
 } = {}) {
-  const [state, dispatch]   = useReducer(reducer, INITIAL_STATE);
-  const landmarkerRef       = useRef(null);
-  const streamRef           = useRef(null);
-  const rafRef              = useRef(null);
-  const lastFrameTimeRef    = useRef(0);
-  const fpsSampleRef        = useRef([]);
-  const videoModeRef        = useRef('WEBCAM'); // 'WEBCAM' | 'FILE'
+  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
+  const landmarkerRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const lastFrameTimeRef = useRef(0);
+  const fpsSampleRef = useRef([]);
+  const videoModeRef = useRef('WEBCAM'); // 'WEBCAM' | 'FILE'
+
+  // ── Shot detection state machine ──────────────────────────────────────
+  // IDLE: waiting for movement; ACTIVE: shot in progress; COOLING: shot done
+  const shotStateRef = useRef('IDLE');   // 'IDLE'|'ACTIVE'|'COOLING'
+  const frameBufferRef = useRef([]);        // rolling {landmarks,timestampMs}[]
+  const cooldownFramesRef = useRef(0);         // consecutive low-velocity frames after shot
+  const resetTimerRef = useRef(null);      // countdown interval id
+  const countdownTickRef = useRef(null);      // 1-second interval for countdown display
 
   // ── Load MediaPipe model once on mount ─────────────────────────────────
   useEffect(() => {
@@ -109,12 +137,12 @@ export function usePoseDetection({
             modelAssetPath: MODEL_URL,
             delegate: 'GPU',    // falls back to CPU automatically
           },
-          runningMode:              'VIDEO',
-          numPoses:                 1,
+          runningMode: 'VIDEO',
+          numPoses: 1,
           minPoseDetectionConfidence: 0.5,
-          minPosePresenceConfidence:  0.5,
-          minTrackingConfidence:      0.5,
-          outputSegmentationMasks:  false,
+          minPosePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+          outputSegmentationMasks: false,
         });
 
         if (!cancelled) {
@@ -165,6 +193,78 @@ export function usePoseDetection({
         type: 'POSE_DATA',
         payload: { landmarks: rawLandmarks, jointAngles, fps },
       });
+
+      // ── Shot detection ─────────────────────────────────────────────────
+      // Only run when not in COOLING (post-shot display) state
+      if (shotStateRef.current !== 'COOLING') {
+        // Append to rolling frame buffer
+        frameBufferRef.current.push({ landmarks: rawLandmarks, timestampMs: nowMs });
+        if (frameBufferRef.current.length > MAX_BUFFER_FRAMES) {
+          frameBufferRef.current.shift();
+        }
+
+        // Compute instantaneous wrist velocity
+        const buf = frameBufferRef.current;
+        let wristVel = 0;
+        if (buf.length >= 2) {
+          const prev = buf[buf.length - 2];
+          const curr = buf[buf.length - 1];
+          const dt = Math.max(nowMs - prev.timestampMs, 1);
+          const LW = 15; // LEFT_WRIST
+          const RW = 16; // RIGHT_WRIST
+          const lS = prev.landmarks[LW] && curr.landmarks[LW]
+            ? Math.sqrt((curr.landmarks[LW].x - prev.landmarks[LW].x) ** 2 + (curr.landmarks[LW].y - prev.landmarks[LW].y) ** 2) / dt
+            : 0;
+          const rS = prev.landmarks[RW] && curr.landmarks[RW]
+            ? Math.sqrt((curr.landmarks[RW].x - prev.landmarks[RW].x) ** 2 + (curr.landmarks[RW].y - prev.landmarks[RW].y) ** 2) / dt
+            : 0;
+          wristVel = (lS + rS) / 2;
+        }
+
+        if (shotStateRef.current === 'IDLE') {
+          if (wristVel > SHOT_START_THRESHOLD) {
+            shotStateRef.current = 'ACTIVE';
+            cooldownFramesRef.current = 0;
+          }
+        } else if (shotStateRef.current === 'ACTIVE') {
+          if (wristVel < SHOT_END_THRESHOLD) {
+            cooldownFramesRef.current++;
+            if (cooldownFramesRef.current >= COOLDOWN_FRAMES) {
+              // ── Shot complete — analyse the buffer ──────────────────────
+              shotStateRef.current = 'COOLING';
+              const analysis = analyzeCompletedShot(
+                frameBufferRef.current, shotType, 'RHB', false, dbBenchmarks
+              );
+              if (analysis) {
+                dispatch({ type: 'SHOT_ANALYZED', payload: analysis });
+
+                // Countdown ticker: fires every 1 s to update the displayed number
+                if (countdownTickRef.current) clearInterval(countdownTickRef.current);
+                countdownTickRef.current = setInterval(() => {
+                  dispatch({ type: 'COUNTDOWN_TICK' });
+                }, 1000);
+
+                // Auto-reset after 5 s
+                if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+                resetTimerRef.current = setTimeout(() => {
+                  dispatch({ type: 'RESET_SHOT' });
+                  if (countdownTickRef.current) {
+                    clearInterval(countdownTickRef.current);
+                    countdownTickRef.current = null;
+                  }
+                  shotStateRef.current = 'IDLE';
+                  frameBufferRef.current = [];
+                }, 5000);
+              } else {
+                // Analysis returned null (not enough frames) — stay IDLE
+                shotStateRef.current = 'IDLE';
+              }
+            }
+          } else {
+            cooldownFramesRef.current = 0; // still moving — reset cooldown
+          }
+        }
+      }
     }
 
     rafRef.current = requestAnimationFrame(detectLoop);
@@ -204,9 +304,9 @@ export function usePoseDetection({
       }
 
       dispatch({ type: 'RUNNING' });
-      fpsSampleRef.current     = [];
+      fpsSampleRef.current = [];
       lastFrameTimeRef.current = 0;
-      rafRef.current           = requestAnimationFrame(detectLoop);
+      rafRef.current = requestAnimationFrame(detectLoop);
 
     } catch (err) {
       console.error('[StanceAI] Camera error:', err);
@@ -226,11 +326,11 @@ export function usePoseDetection({
       dispatch({ type: 'ERROR', payload: 'Pose model not loaded yet. Please wait.' });
       return;
     }
-    videoModeRef.current     = 'FILE';
+    videoModeRef.current = 'FILE';
     dispatch({ type: 'RUNNING' });
-    fpsSampleRef.current     = [];
+    fpsSampleRef.current = [];
     lastFrameTimeRef.current = 0;
-    rafRef.current           = requestAnimationFrame(detectLoop);
+    rafRef.current = requestAnimationFrame(detectLoop);
   }, [state.isRunning, detectLoop]);
 
   // ── Analyze a static image (single-shot, no RAF loop) ──────────────────
@@ -253,7 +353,7 @@ export function usePoseDetection({
 
       if (result.landmarks && result.landmarks.length > 0) {
         const rawLandmarks = result.landmarks[0];
-        const jointAngles  = computeJointAngles(rawLandmarks, shotType, dbBenchmarks);
+        const jointAngles = computeJointAngles(rawLandmarks, shotType, dbBenchmarks);
         dispatch({
           type: 'IMAGE_ANALYZED',
           payload: { landmarks: rawLandmarks, jointAngles },
@@ -295,8 +395,10 @@ export function usePoseDetection({
   // ── Cleanup on unmount ─────────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      if (rafRef.current)   cancelAnimationFrame(rafRef.current);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+      if (countdownTickRef.current) clearInterval(countdownTickRef.current);
     };
   }, []);
 

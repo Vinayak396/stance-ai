@@ -76,6 +76,8 @@ export default function Dashboard() {
     jointAngles,
     fps,
     frameCount,
+    shotAnalysis,
+    resetCountdown,
     startCamera,
     startFromVideoElement,
     analyzeImage,
@@ -306,7 +308,7 @@ export default function Dashboard() {
                 <div className="source-toggle">
                   <button
                     id="btn-rhb"
-                    className={`source-btn${handedness==='RHB' ? ' active' : ''}`}
+                    className={`source-btn${handedness === 'RHB' ? ' active' : ''}`}
                     onClick={() => setHandedness('RHB')}
                     title="Right-hand bat"
                   >
@@ -314,7 +316,7 @@ export default function Dashboard() {
                   </button>
                   <button
                     id="btn-lhb"
-                    className={`source-btn${handedness==='LHB' ? ' active' : ''}`}
+                    className={`source-btn${handedness === 'LHB' ? ' active' : ''}`}
                     onClick={() => setHandedness('LHB')}
                     title="Left-hand bat"
                   >
@@ -372,7 +374,7 @@ export default function Dashboard() {
                   <span>⚠️ {permissionError}</span>
                 </div>
               )}
-            <DualCameraView
+              <DualCameraView
                 shotType={shotType}
                 dbBenchmarks={dbBenchmarks}
                 cam1Id={cam1Id}
@@ -472,54 +474,17 @@ export default function Dashboard() {
             ) : (
               /* ── Single-camera metrics (original) ─────────────────── */
               <>
-                {/* Joint Angles Card */}
+                {/* 3-Phase Shot Analysis Card */}
                 <div className="glass-card metrics-card fade-in-up">
                   <div className="metrics-header">
-                    <span className="panel-title">Joint Angles</span>
+                    <span className="panel-title">Shot Analysis</span>
                     <span className="badge badge-inactive">{shotType.replace(/_/g, ' ')}</span>
                   </div>
-
-                  {jointAngles.length === 0 ? (
-                    <div className="metrics-empty">
-                      <p className="text-muted text-sm">No pose data yet.</p>
-                      <p className="text-muted text-sm">Start analysis to see joint metrics.</p>
-                    </div>
-                  ) : (
-                    <ul className="joint-list">
-                      {jointAngles.map((ja) => {
-                        const q = QUALITY_LABELS[ja.quality] || QUALITY_LABELS.UNCLASSIFIED;
-                        return (
-                          <li key={ja.jointName} className="joint-row">
-                            <div className="joint-info">
-                              <span className="joint-name">{ja.jointName.replace(/_/g, ' ')}</span>
-                              <span className={`badge ${q.cls}`}>{q.label}</span>
-                            </div>
-                            <div className="joint-metrics">
-                              <span className="joint-angle text-mono">
-                                {ja.angleDegrees?.toFixed(1)}°
-                              </span>
-                              {ja.deviation > 0 && (
-                                <span className="joint-deviation text-mono text-muted">
-                                  ±{ja.deviation?.toFixed(1)}°
-                                </span>
-                              )}
-                            </div>
-                            {/* Range bar */}
-                            {ja.optimalMin != null && ja.optimalMax != null && (
-                              <div className="range-bar-wrapper">
-                                <AngleRangeBar
-                                  value={ja.angleDegrees}
-                                  min={ja.optimalMin}
-                                  max={ja.optimalMax}
-                                  quality={ja.quality}
-                                />
-                              </div>
-                            )}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
+                  <ShotPhaseDisplay
+                    shotAnalysis={shotAnalysis}
+                    resetCountdown={resetCountdown}
+                    isRunning={isRunning}
+                  />
                 </div>
 
                 {/* Session Summary Card */}
@@ -623,18 +588,18 @@ function AngleRangeBar({ value, min, max, quality }) {
  */
 function CombinedMetricsCard({ jointAngles, shotType }) {
   const Q = {
-    OPTIMAL:     { label: 'OPT',  cls: 'badge-optimal'  },
-    WARNING:     { label: 'WARN', cls: 'badge-warning'   },
-    CRITICAL:    { label: 'CRIT', cls: 'badge-critical'  },
-    UNCLASSIFIED:{ label: 'N/A',  cls: 'badge-inactive'  },
+    OPTIMAL: { label: 'OPT', cls: 'badge-optimal' },
+    WARNING: { label: 'WARN', cls: 'badge-warning' },
+    CRITICAL: { label: 'CRIT', cls: 'badge-critical' },
+    UNCLASSIFIED: { label: 'N/A', cls: 'badge-inactive' },
   };
 
-  const frontAngles  = jointAngles.filter(ja => ja.source !== 'SIDE');
-  const sideMetrics  = jointAngles.filter(ja => ja.source === 'SIDE');
-  const hasSide      = sideMetrics.length > 0;
+  const frontAngles = jointAngles.filter(ja => ja.source !== 'SIDE');
+  const sideMetrics = jointAngles.filter(ja => ja.source === 'SIDE');
+  const hasSide = sideMetrics.length > 0;
 
   const renderRow = (ja, idx) => {
-    const q    = Q[ja.quality] || Q.UNCLASSIFIED;
+    const q = Q[ja.quality] || Q.UNCLASSIFIED;
     const isSide = ja.source === 'SIDE';
     return (
       <li
@@ -653,7 +618,7 @@ function CombinedMetricsCard({ jointAngles, shotType }) {
         <div className="joint-metrics">
           <span className="joint-angle text-mono" style={{ fontSize: '0.9rem' }}>
             {ja.angleDegrees?.toFixed(1)}{isSide ? '' : '°'}
-            {isSide && <span style={{ fontSize:'0.65rem', marginLeft:3, color:'var(--text-muted)' }}>idx</span>}
+            {isSide && <span style={{ fontSize: '0.65rem', marginLeft: 3, color: 'var(--text-muted)' }}>idx</span>}
           </span>
         </div>
         {ja.optimalMin != null && ja.optimalMax != null && (
@@ -683,7 +648,7 @@ function CombinedMetricsCard({ jointAngles, shotType }) {
           <p className="text-muted text-sm">Start both camera feeds.</p>
         </div>
       ) : (
-        <ul className="joint-list" style={{ overflowY:'auto', scrollbarWidth:'thin' }}>
+        <ul className="joint-list" style={{ overflowY: 'auto', scrollbarWidth: 'thin' }}>
           {/* Front-camera joint angles */}
           {frontAngles.length > 0 && (
             <>
@@ -697,7 +662,7 @@ function CombinedMetricsCard({ jointAngles, shotType }) {
           {/* Divider between front and side metrics */}
           {hasSide && (
             <li className="joint-source-divider joint-source-divider--side">
-              <span>📱 Side View — Footwork & Blind Spots</span>
+              <span>📱 Side View — Footwork &amp; Blind Spots</span>
             </li>
           )}
 
@@ -706,5 +671,153 @@ function CombinedMetricsCard({ jointAngles, shotType }) {
         </ul>
       )}
     </div>
+  );
+}
+
+
+
+// ─── Sub-component: 3-Phase Shot Analysis Display ────────────────────────────
+
+const PHASE_META = {
+  STANCE: { icon: '🧍', label: 'Stance & Trigger', cls: 'stance' },
+  STRIDE_SHOT: { icon: '🦶', label: 'Stride / Shot', cls: 'stride-shot' },
+  FOLLOWTHROUGH: { icon: '🔄', label: 'Follow Through', cls: 'followthrough' },
+};
+
+/**
+ * ShotPhaseDisplay
+ * Shows the idle/recording state until a complete shot is analysed, then
+ * displays three phase cards with per-phase joint metrics.
+ */
+function ShotPhaseDisplay({ shotAnalysis, resetCountdown, isRunning }) {
+  if (!shotAnalysis) {
+    return (
+      <div className="phase-display">
+        <div className="phase-waiting">
+          <div className="phase-waiting-icon">🏏</div>
+          <p className="phase-waiting-title">Ready to Analyse</p>
+          <p className="phase-waiting-sub">
+            Play a complete shot — the system will automatically detect and segment it into 3 phases.
+          </p>
+          {isRunning && (
+            <div className="phase-recording-badge">
+              <div className="phase-recording-dot" />
+              RECORDING
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const { phases, overallQuality } = shotAnalysis;
+  const { total, optimal, warning, critical } = overallQuality;
+  const pct = total > 0 ? Math.round((optimal / total) * 100) : 0;
+
+  const scoreClass =
+    pct >= 80 ? 'shot-quality-score--great' :
+      pct >= 60 ? 'shot-quality-score--good' :
+        pct >= 40 ? 'shot-quality-score--avg' : 'shot-quality-score--poor';
+
+  return (
+    <div className="phase-display">
+      {/* Overall quality banner */}
+      <div className="shot-quality-bar">
+        <span className="shot-quality-label">Shot Score</span>
+        <span className={`shot-quality-score ${scoreClass}`}>{pct}%</span>
+        <div className="shot-quality-chips">
+          {optimal > 0 && <span className="quality-chip quality-chip--opt">✓ {optimal}</span>}
+          {warning > 0 && <span className="quality-chip quality-chip--warn">⚠ {warning}</span>}
+          {critical > 0 && <span className="quality-chip quality-chip--crit">✕ {critical}</span>}
+        </div>
+      </div>
+
+      {/* Countdown strip */}
+      {resetCountdown !== null && (
+        <div className="reset-countdown-strip">
+          <div className="reset-countdown-bar">
+            <div
+              className="reset-countdown-fill"
+              style={{ width: `${(resetCountdown / 5) * 100}%` }}
+            />
+          </div>
+          <span>resets in {resetCountdown}s</span>
+        </div>
+      )}
+
+      {/* Phase cards */}
+      <div className="phase-cards-scroll">
+        {Object.entries(PHASE_META).map(([phaseKey, meta]) => (
+          <PhaseCard
+            key={phaseKey}
+            phaseKey={phaseKey}
+            meta={meta}
+            metrics={phases[phaseKey] ?? []}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Individual phase card
+function PhaseCard({ phaseKey, meta, metrics }) {
+  const total = metrics.length;
+  const optimal = metrics.filter(m => m.quality === 'OPTIMAL').length;
+  const allOpt = total > 0 && optimal === total;
+
+  return (
+    <div className={`phase-card phase-card--${meta.cls}`}>
+      <div className="phase-card-header">
+        <span className="phase-card-icon">{meta.icon}</span>
+        <span className="phase-card-name">{meta.label}</span>
+        <span className={`phase-card-summary${allOpt ? ' phase-card-summary--all-opt' : ''}`}>
+          {optimal}/{total} opt
+        </span>
+      </div>
+
+      {metrics.length === 0 ? (
+        <p className="text-muted text-sm" style={{ padding: '8px 12px' }}>
+          No benchmark data for this phase.
+        </p>
+      ) : (
+        <ul className="phase-joint-list">
+          {metrics.map(m => <PhaseJointRow key={m.jointName} metric={m} />)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Single joint row inside a phase card
+function PhaseJointRow({ metric: ja }) {
+  const Q = {
+    OPTIMAL: { label: 'OPT', cls: 'badge-optimal' },
+    WARNING: { label: 'WARN', cls: 'badge-warning' },
+    CRITICAL: { label: 'CRIT', cls: 'badge-critical' },
+    UNCLASSIFIED: { label: 'N/A', cls: 'badge-inactive' },
+  };
+  const q = Q[ja.quality] || Q.UNCLASSIFIED;
+
+  return (
+    <li className="phase-joint-row">
+      <span className="phase-joint-name">
+        {ja.jointName.replace(/_/g, ' ')}
+        <span className="phase-joint-angle">{ja.angleDegrees?.toFixed(1)}°</span>
+      </span>
+      <div className="phase-joint-badge-wrap">
+        <span className={`badge ${q.cls}`}>{q.label}</span>
+      </div>
+      {ja.optimalMin != null && ja.optimalMax != null && (
+        <div className="phase-joint-bar-wrap">
+          <AngleRangeBar
+            value={ja.angleDegrees}
+            min={ja.optimalMin}
+            max={ja.optimalMax}
+            quality={ja.quality}
+          />
+        </div>
+      )}
+    </li>
   );
 }
