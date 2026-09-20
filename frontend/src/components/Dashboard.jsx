@@ -48,13 +48,17 @@ export default function Dashboard() {
   // uploadedFile tracks the most-recently loaded file for re-analysis
   const [uploadedFile, setUploadedFile] = useState(null); // { url, type: 'image'|'video' }
   const [uploadRunning, setUploadRunning] = useState(false); // video upload loop active
-  // Dual-camera mode
+  // Video frame scaling mode: 'contain' (full frame, uncropped) or 'cover' (fill panel)
+  const [fitMode, setFitMode] = useState('contain');
+  // Dual-camera Pro Mode
   const [dualMode, setDualMode] = useState(false);
   const [dualMergedAngles, setDualMergedAngles] = useState([]); // unified front+stride angles
-  // Handedness: RHB (right-hand bat) or LHB (left-hand bat)
+  // Handedness: RHB (right-hand bat) or LHB (left-hand bat) — applies to single & dual modes
   const [handedness, setHandedness] = useState('RHB');
-  // flipSideCam: reverse front/back foot direction when phone is on the opposite side
+  // flipSideCam: reverse front/back foot direction when phone is on the opposite side (dual mode only)
   const [flipSideCam, setFlipSideCam] = useState(false);
+  // Camera setup tip: dismissible once-per-session
+  const [setupTipDismissed, setSetupTipDismissed] = useState(false);
 
   // ── Dual camera device management ────────────────────────────────────
   const {
@@ -67,22 +71,38 @@ export default function Dashboard() {
     requestPermission,
   } = useDualCamera();
 
+  const handleFileVideoEnded = useCallback(() => {
+    setUploadRunning(false);
+  }, []);
+
   // ── Pose Detection Hook (runs MediaPipe WASM in-browser) ─────────────
   const {
     isModelReady,
     isRunning,
     error,
     landmarks,
+    worldLandmarks,
     jointAngles,
     fps,
     frameCount,
-    shotAnalysis,
-    resetCountdown,
+    videoAnalysis,
+    prepCountdown,
+    shotDetectionState,
     startCamera,
     startFromVideoElement,
     analyzeImage,
     stopCamera,
-  } = usePoseDetection({ shotType, dbBenchmarks, videoRef });
+    finalizeFileAnalysis,
+    startNextShot,
+    skipPrepCountdown,
+    reanalyzeFromBuffer,
+  } = usePoseDetection({
+    shotType,
+    dbBenchmarks,
+    videoRef,
+    handedness,
+    onFileVideoEnded: handleFileVideoEnded,
+  });
 
   // ── Load benchmarks from Supabase when shot type changes ─────────────
   useEffect(() => {
@@ -131,6 +151,7 @@ export default function Dashboard() {
     if (!file) return;
     e.target.value = '';
 
+    if (!isModelReady) return;
     if (isRunning) stopCamera();
 
     const url = URL.createObjectURL(file);
@@ -155,50 +176,72 @@ export default function Dashboard() {
       if (!video) return;
       video.srcObject = null;
       video.src = url;
+      video.loop = false;
       video.oncanplay = () => {
         video.oncanplay = null;
-        video.play().catch(() => { });
         startFromVideoElement();
+        video.play().catch(() => { });
         setUploadRunning(true);
       };
     }
-  }, [isRunning, stopCamera, videoRef, analyzeImage, startFromVideoElement]);
+  }, [isModelReady, isRunning, stopCamera, videoRef, analyzeImage, startFromVideoElement]);
 
   // ── Re-analyze uploaded file with current shot type ──────────────────
   const reanalyzeUpload = useCallback(() => {
     if (!uploadedFile) return;
 
     if (uploadedFile.type === 'image') {
+      // Re-analyze the already-rendered image element directly
+      const existingImg = imgRef.current;
+      if (existingImg && existingImg.complete && existingImg.naturalWidth > 0) {
+        videoDimsRef.current = { width: existingImg.naturalWidth, height: existingImg.naturalHeight };
+        analyzeImage(existingImg);
+        return;
+      }
+      // Fallback: load a fresh Image from the blob URL
       const img = new Image();
       img.onload = () => {
         videoDimsRef.current = { width: img.naturalWidth, height: img.naturalHeight };
         analyzeImage(img);
       };
       img.src = uploadedFile.url;
+      if (img.complete && img.naturalWidth > 0) {
+        videoDimsRef.current = { width: img.naturalWidth, height: img.naturalHeight };
+        analyzeImage(img);
+      }
     } else {
-      // Video: seek to start and restart the loop
+      // Video: always replay from frame 0 so MediaPipe re-processes every frame
+      // with the current shot type and benchmarks.
+      // The blob URL is still valid (uploadedFile.url) — we just rewind and replay.
       const video = videoRef.current;
       if (!video) return;
-      stopCamera();
+
+      // Stop any active loop / finalize any running analysis first
+      if (isRunning) stopCamera();
+
+      // Reset video to start and replay through MediaPipe
+      video.src = uploadedFile.url; // re-assign ensures video is loaded
       video.currentTime = 0;
+      video.loop = false;
       video.oncanplay = () => {
         video.oncanplay = null;
-        video.play().catch(() => { });
         startFromVideoElement();
+        video.play().catch(() => { });
         setUploadRunning(true);
       };
-      // If video is already loaded, trigger canplay manually
+      // If the video is already ready (cached), fire canplay immediately
       if (video.readyState >= 3) {
         video.dispatchEvent(new Event('canplay'));
       }
     }
-  }, [uploadedFile, analyzeImage, videoRef, stopCamera, startFromVideoElement]);
+  }, [uploadedFile, analyzeImage, imgRef, videoRef, isRunning, stopCamera, startFromVideoElement]);
+
 
   // ── Stop uploaded video analysis ──────────────────────────────────
   const stopUploadAnalysis = useCallback(() => {
-    stopCamera();
+    finalizeFileAnalysis?.();
     setUploadRunning(false);
-  }, [stopCamera]);
+  }, [finalizeFileAnalysis]);
 
   // ── Track Video Dimensions for Canvas Sizing ──────────────────────────
   const handleVideoMetadata = useCallback(() => {
@@ -222,9 +265,11 @@ export default function Dashboard() {
         ? { color: '#00e676', label: `Live · ${fps} fps` }
         : imageUrl && landmarks.length > 0
           ? { color: '#7c4dff', label: 'Photo · analyzed' }
-          : isModelReady
-            ? { color: '#00b0ff', label: 'Model Ready' }
-            : { color: '#90a4ae', label: 'Loading Model...' };
+          : uploadedFile?.type === 'video' && videoAnalysis
+            ? { color: '#7c4dff', label: 'Video · Analyzed' }
+            : isModelReady
+              ? { color: '#00b0ff', label: 'Model Ready' }
+              : { color: '#90a4ae', label: 'Loading Model...' };
 
   return (
     <>
@@ -261,14 +306,20 @@ export default function Dashboard() {
 
             <div className="control-group">
               <label className="control-label">Input</label>
-              <label className="source-btn" htmlFor="file-upload-input">
-                📁 Upload Video / Photo
+              <label
+                className={`source-btn${!isModelReady ? ' disabled' : ''}`}
+                htmlFor="file-upload-input"
+                style={!isModelReady ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
+                title={!isModelReady ? 'Please wait, AI model is downloading & warming up...' : 'Upload cricket video or photo'}
+              >
+                {!isModelReady ? '⏳ Model Loading...' : '📁 Upload Video / Photo'}
                 <input
                   id="file-upload-input"
                   type="file"
                   accept="video/*,image/*"
                   style={{ display: 'none' }}
                   onChange={handleFileUpload}
+                  disabled={!isModelReady}
                 />
               </label>
             </div>
@@ -292,8 +343,8 @@ export default function Dashboard() {
                     id="btn-reanalyze-upload"
                     className="btn btn-accent btn-sm"
                     onClick={reanalyzeUpload}
-                    disabled={!isModelReady || isRunning}
-                    title={isRunning ? 'Stop webcam first' : 'Re-run analysis with current shot type'}
+                    disabled={!isModelReady || isUploadVideoRunning}
+                    title={isUploadVideoRunning ? 'Analysis running…' : 'Re-run analysis with current shot type'}
                   >
                     ⟳ Re-analyze
                   </button>
@@ -301,39 +352,37 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Handedness toggle — shown in dual mode only */}
-            {dualMode && (
-              <div className="control-group">
-                <label className="control-label">Batting</label>
-                <div className="source-toggle">
-                  <button
-                    id="btn-rhb"
-                    className={`source-btn${handedness === 'RHB' ? ' active' : ''}`}
-                    onClick={() => setHandedness('RHB')}
-                    title="Right-hand bat"
-                  >
-                    RHB
-                  </button>
-                  <button
-                    id="btn-lhb"
-                    className={`source-btn${handedness === 'LHB' ? ' active' : ''}`}
-                    onClick={() => setHandedness('LHB')}
-                    title="Left-hand bat"
-                  >
-                    LHB
-                  </button>
-                </div>
+            {/* Handedness toggle — always shown (applies to 3D single & dual modes) */}
+            <div className="control-group">
+              <label className="control-label">Batting</label>
+              <div className="source-toggle">
+                <button
+                  id="btn-rhb"
+                  className={`source-btn${handedness === 'RHB' ? ' active' : ''}`}
+                  onClick={() => setHandedness('RHB')}
+                  title="Right-hand bat"
+                >
+                  RHB
+                </button>
+                <button
+                  id="btn-lhb"
+                  className={`source-btn${handedness === 'LHB' ? ' active' : ''}`}
+                  onClick={() => setHandedness('LHB')}
+                  title="Left-hand bat"
+                >
+                  LHB
+                </button>
               </div>
-            )}
+            </div>
 
-            {/* Dual-camera mode toggle */}
+            {/* Pro Mode (Dual Camera) toggle */}
             <button
               id={dualMode ? 'btn-single-cam' : 'btn-dual-cam'}
               className={`btn btn-sm ${dualMode ? 'btn-accent' : 'btn-secondary'}`}
               onClick={handleDualModeToggle}
-              title={dualMode ? 'Switch to single camera' : 'Switch to dual camera (laptop + phone)'}
+              title={dualMode ? 'Switch to single camera (recommended)' : 'Switch to Pro Mode: dual camera (laptop + phone)'}
             >
-              {dualMode ? '📷 Single Camera' : '📷📱 Dual Camera'}
+              {dualMode ? '📷 Single Camera' : '📷📱 Pro Mode'}
             </button>
 
             {/* Webcam stream toggle — hidden in dual mode (each feed has its own controls) */}
@@ -393,19 +442,63 @@ export default function Dashboard() {
             /* ── Single camera mode (original) ────────────────────────── */
             <section className="video-panel glass-card" aria-label="Video feed with skeleton overlay">
               <div className="video-panel-header">
-                <span className="panel-title">Live Feed</span>
-                {isUploadVideoRunning && (
-                  <div className="live-badge" style={{ borderColor: 'rgba(0,230,118,0.3)' }}>
-                    <div className="pulse-dot" />
-                    <span>FILE</span>
+                <div className="panel-header-left">
+                  <span className="panel-title">Live Feed</span>
+                  <div className="fit-toggle" role="group" aria-label="Video scaling mode">
+                    <button
+                      type="button"
+                      className={`fit-btn${fitMode === 'contain' ? ' active' : ''}`}
+                      onClick={() => setFitMode('contain')}
+                      title="Full Frame (no cropping - shows full video/photo)"
+                    >
+                      ⛶ Full Frame
+                    </button>
+                    <button
+                      type="button"
+                      className={`fit-btn${fitMode === 'cover' ? ' active' : ''}`}
+                      onClick={() => setFitMode('cover')}
+                      title="Fill (crops to fill entire panel)"
+                    >
+                      🔲 Fill
+                    </button>
                   </div>
-                )}
-                {isRunning && !uploadRunning && (
-                  <div className="live-badge">
-                    <div className="pulse-dot" />
-                    <span>LIVE</span>
-                  </div>
-                )}
+                </div>
+
+                <div className="panel-header-right">
+                  {isUploadVideoRunning && (
+                    <div className="live-badge" style={{ borderColor: 'rgba(0,230,118,0.3)' }}>
+                      <div className="pulse-dot" />
+                      <span>FILE</span>
+                    </div>
+                  )}
+                  {isRunning && !uploadRunning && (
+                    <>
+                      {shotDetectionState === 'PREPARING' && (
+                        <div className="live-badge badge-prep">
+                          <div className="pulse-dot pulse-dot--amber" />
+                          <span>GET READY ({typeof prepCountdown === 'number' ? prepCountdown : 5}s)</span>
+                        </div>
+                      )}
+                      {shotDetectionState === 'ACTIVE' && (
+                        <div className="live-badge badge-stroke">
+                          <div className="pulse-dot pulse-dot--cyan" />
+                          <span>STROKE DETECTED</span>
+                        </div>
+                      )}
+                      {shotDetectionState === 'IDLE' && (
+                        <div className="live-badge badge-ready">
+                          <div className="pulse-dot" />
+                          <span>IN STANCE · READY</span>
+                        </div>
+                      )}
+                      {shotDetectionState === 'COOLING' && (
+                        <div className="live-badge badge-analyzed">
+                          <span>✓ SHOT ANALYZED</span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
 
               <div className="video-wrapper">
@@ -415,17 +508,22 @@ export default function Dashboard() {
                     ref={imgRef}
                     src={imageUrl}
                     alt="Uploaded photo for pose analysis"
-                    style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+                    className={`video-element fit-${fitMode}`}
+                    style={{ width: '100%', height: '100%', display: 'block' }}
                   />
                 ) : (
                   /* Video element (webcam or video file) */
                   <video
                     ref={videoRef}
                     id="stance-video"
-                    className="video-element"
+                    className={`video-element fit-${fitMode}`}
                     autoPlay
                     playsInline
                     muted
+                    onEnded={() => {
+                      finalizeFileAnalysis?.();
+                      handleFileVideoEnded();
+                    }}
                     onLoadedMetadata={handleVideoMetadata}
                   />
                 )}
@@ -435,15 +533,64 @@ export default function Dashboard() {
                   landmarks={landmarks}
                   jointAngles={jointAngles}
                   videoRef={videoRef}
+                  imgRef={imgRef}
+                  fitMode={fitMode}
                   showAngles={true}
                 />
+
+                {/* Preparation Countdown Overlay for live webcam drills */}
+                {prepCountdown !== null && isRunning && !uploadRunning && (
+                  <div className="prep-overlay fade-in">
+                    <div className="prep-card">
+                      <div className="prep-tag">BATSMAN PREPARATION</div>
+                      {typeof prepCountdown === 'number' && prepCountdown > 0 ? (
+                        <>
+                          <div className="prep-countdown-number" key={prepCountdown}>
+                            {prepCountdown}
+                          </div>
+                          <div className="prep-prompt">Walk back &amp; take your batting stance</div>
+                          <p className="prep-subtext">Shot detection begins when countdown finishes</p>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-accent prep-skip-btn"
+                            onClick={skipPrepCountdown}
+                          >
+                            ⚡ Ready Now
+                          </button>
+                        </>
+                      ) : (
+                        <div className="prep-ready-callout">
+                          <div className="prep-ready-icon">🏏</div>
+                          <div className="prep-ready-title">READY! PLAY YOUR SHOT</div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Camera setup tip — shown only in single-camera mode, dismissible */}
+                {!dualMode && !setupTipDismissed && !isRunning && !imageUrl && (
+                  <div className="camera-setup-tip">
+                    <span className="setup-tip-icon">💡</span>
+                    <span className="setup-tip-text">
+                      <strong>Best results:</strong> Place camera at a
+                      <strong> 30–45° angle</strong> (Extra-Cover / Mid-Wicket).
+                      Single camera now detects stride &amp; footwork automatically!
+                    </span>
+                    <button
+                      className="setup-tip-dismiss"
+                      onClick={() => setSetupTipDismissed(true)}
+                      aria-label="Dismiss tip"
+                    >✕</button>
+                  </div>
+                )}
 
                 {/* Empty state message */}
                 {!isRunning && !imageUrl && landmarks.length === 0 && (
                   <div className="video-placeholder">
                     <div className="placeholder-icon">🦴</div>
                     <p>Press <strong>Start Webcam</strong> to begin</p>
-                    <p className="text-muted text-sm">Powered by MediaPipe · No server required</p>
+                    <p className="text-muted text-sm">Single camera · 3D pose analysis · No server required</p>
                   </div>
                 )}
               </div>
@@ -474,58 +621,87 @@ export default function Dashboard() {
             ) : (
               /* ── Single-camera metrics (original) ─────────────────── */
               <>
-                {/* 3-Phase Shot Analysis Card */}
-                <div className="glass-card metrics-card fade-in-up">
+                {/* Analysis Results Card */}
+                <div className="glass-card metrics-card metrics-card--analysis fade-in-up">
                   <div className="metrics-header">
-                    <span className="panel-title">Shot Analysis</span>
-                    <span className="badge badge-inactive">{shotType.replace(/_/g, ' ')}</span>
+                    <div className="metrics-header-left">
+                      <span className="panel-title">Analysis</span>
+                      <span className="badge badge-inactive">{shotType.replace(/_/g, ' ')}</span>
+                    </div>
+                    {videoAnalysis && (
+                      <button
+                        id="btn-next-shot"
+                        className="btn btn-xs btn-primary next-shot-btn"
+                        onClick={() => startNextShot(5)}
+                        title="Clear and prepare to record your next shot"
+                      >
+                        🎯 Next Shot
+                      </button>
+                    )}
                   </div>
-                  <ShotPhaseDisplay
-                    shotAnalysis={shotAnalysis}
-                    resetCountdown={resetCountdown}
+                  <VideoAnalysisDisplay
+                    videoAnalysis={videoAnalysis}
+                    jointAngles={jointAngles}
                     isRunning={isRunning}
+                    prepCountdown={prepCountdown}
+                    shotDetectionState={shotDetectionState}
+                    onNextShot={() => startNextShot(5)}
                   />
                 </div>
 
-                {/* Session Summary Card */}
-                <div className="glass-card metrics-card fade-in-up" style={{ animationDelay: '80ms' }}>
+                {/* Session Summary Card — Compact */}
+                <div className="glass-card metrics-card metrics-card--session fade-in-up" style={{ animationDelay: '80ms' }}>
                   <div className="metrics-header">
                     <span className="panel-title">Session</span>
                   </div>
-                  <div className="session-stats">
-                    <div className="stat-item">
-                      <span className="stat-value text-mono">{frameCount}</span>
-                      <span className="stat-label">Frames Analyzed</span>
+                  <div className="session-stats-compact">
+                    <div className="stat-item-compact">
+                      <span className="stat-val-compact text-mono">{frameCount}</span>
+                      <span className="stat-lbl-compact">Frames</span>
                     </div>
-                    <div className="stat-item">
-                      <span className="stat-value text-mono">
-                        {jointAngles.filter(j => j.quality === 'OPTIMAL').length}
-                        <span className="text-muted"> / {jointAngles.length}</span>
+                    <div className="stat-item-compact">
+                      <span className="stat-val-compact text-mono">
+                        {videoAnalysis
+                          ? (videoAnalysis.overallQuality.score != null
+                              ? `${videoAnalysis.overallQuality.score}`
+                              : `${videoAnalysis.overallQuality.optimal}`)
+                          : jointAngles.filter(j => j.quality === 'OPTIMAL').length}
+                        <span className="text-muted" style={{ fontSize: '0.7rem' }}>
+                          {videoAnalysis?.overallQuality.score != null ? '/100' : `/${videoAnalysis ? videoAnalysis.overallQuality.total : jointAngles.length}`}
+                        </span>
                       </span>
-                      <span className="stat-label">Joints Optimal</span>
+                      <span className="stat-lbl-compact">{videoAnalysis?.overallQuality.score != null ? 'Score' : 'Optimal'}</span>
                     </div>
-                    <div className="stat-item">
-                      <span className="stat-value text-mono" style={{ color: isRunning ? '#00e676' : '#90a4ae' }}>
+                    <div className="stat-item-compact">
+                      <span className="stat-val-compact text-mono" style={{ color: isRunning ? '#00e676' : '#90a4ae' }}>
                         {isRunning ? `${fps} fps` : 'Idle'}
                       </span>
-                      <span className="stat-label">Inference FPS</span>
+                      <span className="stat-lbl-compact">Inference</span>
                     </div>
                   </div>
                 </div>
               </>
             )}
 
-            {/* Legend Card — always visible */}
-            <div className="glass-card metrics-card fade-in-up" style={{ animationDelay: '160ms' }}>
+            {/* Legend Card — Compact */}
+            <div className="glass-card metrics-card metrics-card--legend fade-in-up" style={{ animationDelay: '160ms' }}>
               <div className="metrics-header">
                 <span className="panel-title">Legend</span>
               </div>
-              <ul className="legend-list">
-                <li><span className="legend-dot" style={{ background: '#00e676' }} />Optimal — Within benchmark range</li>
-                <li><span className="legend-dot" style={{ background: '#ffd600' }} />Warning — Moderate deviation</li>
-                <li><span className="legend-dot" style={{ background: '#ff1744' }} />Critical — Significant deviation</li>
-                <li><span className="legend-dot" style={{ background: '#90a4ae' }} />No benchmark for this joint</li>
-              </ul>
+              <div className="legend-pills">
+                <span className="legend-pill" title="Within benchmark range">
+                  <span className="legend-dot" style={{ background: '#00e676' }} />Optimal
+                </span>
+                <span className="legend-pill" title="Moderate deviation">
+                  <span className="legend-dot" style={{ background: '#ffd600' }} />Warning
+                </span>
+                <span className="legend-pill" title="Significant deviation">
+                  <span className="legend-dot" style={{ background: '#ff1744' }} />Critical
+                </span>
+                <span className="legend-pill" title="No benchmark for this joint">
+                  <span className="legend-dot" style={{ background: '#90a4ae' }} />No Data
+                </span>
+              </div>
             </div>
           </aside>
         </main>
@@ -676,33 +852,44 @@ function CombinedMetricsCard({ jointAngles, shotType }) {
 
 
 
-// ─── Sub-component: 3-Phase Shot Analysis Display ────────────────────────────
+// ─── Sub-component: Video Analysis Display ───────────────────────────────────
 
-const PHASE_META = {
-  STANCE: { icon: '🧍', label: 'Stance & Trigger', cls: 'stance' },
-  STRIDE_SHOT: { icon: '🦶', label: 'Stride / Shot', cls: 'stride-shot' },
-  FOLLOWTHROUGH: { icon: '🔄', label: 'Follow Through', cls: 'followthrough' },
+const Q_LABEL = {
+  OPTIMAL: { label: 'OPT', cls: 'badge-optimal' },
+  WARNING: { label: 'WARN', cls: 'badge-warning' },
+  CRITICAL: { label: 'CRIT', cls: 'badge-critical' },
+  UNCLASSIFIED: { label: 'N/A', cls: 'badge-inactive' },
 };
 
 /**
- * ShotPhaseDisplay
- * Shows the idle/recording state until a complete shot is analysed, then
- * displays three phase cards with per-phase joint metrics.
+ * VideoAnalysisDisplay
+ * Shows live joint angles while detection is running, then freezes on the
+ * best-frame result when analysis is complete. Replaces the 3-phase display.
  */
-function ShotPhaseDisplay({ shotAnalysis, resetCountdown, isRunning }) {
-  if (!shotAnalysis) {
+function VideoAnalysisDisplay({ videoAnalysis, jointAngles, isRunning, prepCountdown, shotDetectionState, onNextShot }) {
+  // Which angles to display: completed analysis or live frame
+  const displayAngles = videoAnalysis ? videoAnalysis.jointAngles : jointAngles;
+  const hasData = displayAngles && displayAngles.length > 0;
+
+  if (!hasData) {
     return (
       <div className="phase-display">
         <div className="phase-waiting">
           <div className="phase-waiting-icon">🏏</div>
-          <p className="phase-waiting-title">Ready to Analyse</p>
-          <p className="phase-waiting-sub">
-            Play a complete shot — the system will automatically detect and segment it into 3 phases.
+          <p className="phase-waiting-title">
+            {prepCountdown !== null
+              ? (prepCountdown > 0 ? `Get Ready (${prepCountdown}s)` : 'Ready!')
+              : isRunning ? 'Detecting pose…' : 'Ready to Analyse'}
           </p>
-          {isRunning && (
+          <p className="phase-waiting-sub">
+            {isRunning
+              ? 'Joint angles will appear as soon as a pose is detected.'
+              : 'Upload a video or start the webcam to begin analysis.'}
+          </p>
+          {isRunning && shotDetectionState === 'ACTIVE' && (
             <div className="phase-recording-badge">
               <div className="phase-recording-dot" />
-              RECORDING
+              SHOT DETECTED
             </div>
           )}
         </div>
@@ -710,114 +897,87 @@ function ShotPhaseDisplay({ shotAnalysis, resetCountdown, isRunning }) {
     );
   }
 
-  const { phases, overallQuality } = shotAnalysis;
-  const { total, optimal, warning, critical } = overallQuality;
-  const pct = total > 0 ? Math.round((optimal / total) * 100) : 0;
+  const frontAngles = displayAngles.filter(ja => ja.source !== 'SIDE');
+  const sideMetrics = displayAngles.filter(ja => ja.source === 'SIDE');
 
-  const scoreClass =
+  // Overall score banner (only when analysis is complete)
+  const oq = videoAnalysis?.overallQuality;
+  // Use proximity-based score (0-100, continuous distance from optimal) instead of count ratio
+  const pct = oq?.score ?? null;
+  const scoreClass = pct === null ? '' :
     pct >= 80 ? 'shot-quality-score--great' :
       pct >= 60 ? 'shot-quality-score--good' :
         pct >= 40 ? 'shot-quality-score--avg' : 'shot-quality-score--poor';
 
-  return (
-    <div className="phase-display">
-      {/* Overall quality banner */}
-      <div className="shot-quality-bar">
-        <span className="shot-quality-label">Shot Score</span>
-        <span className={`shot-quality-score ${scoreClass}`}>{pct}%</span>
-        <div className="shot-quality-chips">
-          {optimal > 0 && <span className="quality-chip quality-chip--opt">✓ {optimal}</span>}
-          {warning > 0 && <span className="quality-chip quality-chip--warn">⚠ {warning}</span>}
-          {critical > 0 && <span className="quality-chip quality-chip--crit">✕ {critical}</span>}
+  const renderJointRow = (ja, i) => {
+    const q = Q_LABEL[ja.quality] || Q_LABEL.UNCLASSIFIED;
+    const isSide = ja.source === 'SIDE';
+    return (
+      <li key={`${ja.jointName}-${i}`} className={`phase-joint-row${isSide ? ' joint-row--stride' : ''}`}>
+        <span className="phase-joint-name">
+          {ja.jointName.replace(/_/g, ' ')}
+          {isSide && (
+            <span className="joint-source-badge joint-source-badge--side">STRIDE</span>
+          )}
+          <span className="phase-joint-angle">{ja.angleDegrees?.toFixed(1)}{isSide ? '' : '°'}</span>
+        </span>
+        <div className="phase-joint-badge-wrap">
+          <span className={`badge ${q.cls}`}>{q.label}</span>
         </div>
-      </div>
-
-      {/* Countdown strip */}
-      {resetCountdown !== null && (
-        <div className="reset-countdown-strip">
-          <div className="reset-countdown-bar">
-            <div
-              className="reset-countdown-fill"
-              style={{ width: `${(resetCountdown / 5) * 100}%` }}
+        {ja.optimalMin != null && ja.optimalMax != null && (
+          <div className="phase-joint-bar-wrap">
+            <AngleRangeBar
+              value={ja.angleDegrees}
+              min={ja.optimalMin}
+              max={ja.optimalMax}
+              quality={ja.quality}
             />
           </div>
-          <span>resets in {resetCountdown}s</span>
-        </div>
-      )}
-
-      {/* Phase cards */}
-      <div className="phase-cards-scroll">
-        {Object.entries(PHASE_META).map(([phaseKey, meta]) => (
-          <PhaseCard
-            key={phaseKey}
-            phaseKey={phaseKey}
-            meta={meta}
-            metrics={phases[phaseKey] ?? []}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// Individual phase card
-function PhaseCard({ phaseKey, meta, metrics }) {
-  const total = metrics.length;
-  const optimal = metrics.filter(m => m.quality === 'OPTIMAL').length;
-  const allOpt = total > 0 && optimal === total;
-
-  return (
-    <div className={`phase-card phase-card--${meta.cls}`}>
-      <div className="phase-card-header">
-        <span className="phase-card-icon">{meta.icon}</span>
-        <span className="phase-card-name">{meta.label}</span>
-        <span className={`phase-card-summary${allOpt ? ' phase-card-summary--all-opt' : ''}`}>
-          {optimal}/{total} opt
-        </span>
-      </div>
-
-      {metrics.length === 0 ? (
-        <p className="text-muted text-sm" style={{ padding: '8px 12px' }}>
-          No benchmark data for this phase.
-        </p>
-      ) : (
-        <ul className="phase-joint-list">
-          {metrics.map(m => <PhaseJointRow key={m.jointName} metric={m} />)}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-// Single joint row inside a phase card
-function PhaseJointRow({ metric: ja }) {
-  const Q = {
-    OPTIMAL: { label: 'OPT', cls: 'badge-optimal' },
-    WARNING: { label: 'WARN', cls: 'badge-warning' },
-    CRITICAL: { label: 'CRIT', cls: 'badge-critical' },
-    UNCLASSIFIED: { label: 'N/A', cls: 'badge-inactive' },
+        )}
+      </li>
+    );
   };
-  const q = Q[ja.quality] || Q.UNCLASSIFIED;
 
   return (
-    <li className="phase-joint-row">
-      <span className="phase-joint-name">
-        {ja.jointName.replace(/_/g, ' ')}
-        <span className="phase-joint-angle">{ja.angleDegrees?.toFixed(1)}°</span>
-      </span>
-      <div className="phase-joint-badge-wrap">
-        <span className={`badge ${q.cls}`}>{q.label}</span>
-      </div>
-      {ja.optimalMin != null && ja.optimalMax != null && (
-        <div className="phase-joint-bar-wrap">
-          <AngleRangeBar
-            value={ja.angleDegrees}
-            min={ja.optimalMin}
-            max={ja.optimalMax}
-            quality={ja.quality}
-          />
+    <div className="phase-display">
+      {/* Score banner — only shown when analysis complete */}
+      {pct !== null && (
+        <div className="shot-quality-bar">
+          <span className="shot-quality-label">Shot Score</span>
+          <span className={`shot-quality-score ${scoreClass}`}>{pct}%</span>
+          <div className="shot-quality-chips">
+            {oq.optimal > 0 && <span className="quality-chip quality-chip--opt">✓ {oq.optimal}</span>}
+            {oq.warning > 0 && <span className="quality-chip quality-chip--warn">⚠ {oq.warning}</span>}
+            {oq.critical > 0 && <span className="quality-chip quality-chip--crit">✕ {oq.critical}</span>}
+          </div>
         </div>
       )}
-    </li>
+
+      {/* Next-shot button for live webcam */}
+      {onNextShot && isRunning && videoAnalysis && (
+        <div className="next-shot-banner">
+          <button type="button" className="btn btn-sm btn-primary next-shot-action" onClick={onNextShot}>
+            🎯 Ready for Next Shot
+          </button>
+        </div>
+      )}
+
+      {/* Joint angle list */}
+      <ul className="phase-joint-list" style={{ overflowY: 'auto', scrollbarWidth: 'thin' }}>
+        {frontAngles.length > 0 && (
+          <>
+            <li className="joint-source-divider"><span>🦴 Joint Angles</span></li>
+            {frontAngles.map(renderJointRow)}
+          </>
+        )}
+        {sideMetrics.length > 0 && (
+          <>
+            <li className="joint-source-divider joint-source-divider--side"><span>📏 Footwork &amp; Depth</span></li>
+            {sideMetrics.map(renderJointRow)}
+          </>
+        )}
+      </ul>
+    </div>
   );
 }
+

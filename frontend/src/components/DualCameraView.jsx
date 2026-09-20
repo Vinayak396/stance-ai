@@ -99,7 +99,10 @@ export default function DualCameraView({
     <div className="dual-camera-root">
       {/* Top action bar */}
       <div className="dual-action-bar">
-        <span className="panel-title">Dual Camera Feed</span>
+        <span className="panel-title">
+          Dual Camera Feed
+          <span className="pro-mode-badge">PRO MODE</span>
+        </span>
         <div className="dual-action-controls">
           {swapCameras && (
             <button
@@ -254,6 +257,7 @@ function CameraFeedPanel({
           landmarks={landmarks}
           jointAngles={isSideCam ? [] : jointAngles}
           videoRef={videoRef}
+          fitMode="contain"
           showAngles={!isSideCam}
         />
         {!isRunning && landmarks.length === 0 && (

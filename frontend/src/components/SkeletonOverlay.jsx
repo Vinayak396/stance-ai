@@ -37,34 +37,39 @@ const DEFAULT_JOINT_COLOR = 'rgba(61, 142, 240, 1.0)';
  * COORDINATE MAPPING — how it works:
  *   MediaPipe always sees the full, uncropped video frame and returns
  *   landmarks as (x, y) ∈ [0,1] normalised to that full frame.
- *   The CSS `object-fit: cover` rule scales the video so the SHORTER
- *   dimension fills the panel; the LONGER dimension is centred and cropped.
- *   We mirror that exact scale+offset in the canvas draw so every dot
- *   lands on the correct pixel.
+ *   
+ *   In 'contain' mode (default):
+ *     The video/image is scaled so the entire frame fits within the container
+ *     without cropping (letterbox/pillarbox).
+ *     scale = min(canvasW / srcW, canvasH / srcH)
+ *   
+ *   In 'cover' mode:
+ *     The video fills the container with the longer dimension cropped.
+ *     scale = max(canvasW / srcW, canvasH / srcH)
  *
- *   Formula (matches browser object-fit: cover):
- *     scaleX = canvasW / srcW
- *     scaleY = canvasH / srcH
- *     scale  = max(scaleX, scaleY)          ← cover: fill by larger scale
+ *   Formula:
  *     renderW = srcW * scale
  *     renderH = srcH * scale
- *     offsetX = (canvasW - renderW) / 2     ← negative = cropped
+ *     offsetX = (canvasW - renderW) / 2
  *     offsetY = (canvasH - renderH) / 2
  *     px(lm)  = offsetX + lm.x * renderW
  *     py(lm)  = offsetY + lm.y * renderH
  *
  * Props:
  *   landmarks   {Array}            - MediaPipe landmark array [{x,y,z,visibility}, …]
- *   jointAngles {Array}            - [{landmark_b, quality, angle_degrees}, …]
+ *   jointAngles {Array}            - [{landmarkB, quality, angleDegrees}, …]
  *   videoRef    {React.RefObject}  - Ref to the sibling <video> element.
- *                                    Used to read videoWidth/videoHeight live.
+ *   imgRef      {React.RefObject}  - Ref to the sibling <img> element (if photo upload).
  *   showAngles  {boolean}          - Draw degree labels at key joints.
+ *   fitMode     {string}           - 'contain' (default, full frame) or 'cover' (fill).
  */
 export default function SkeletonOverlay({
   landmarks   = [],
   jointAngles = [],
   videoRef    = null,
+  imgRef      = null,
   showAngles  = true,
+  fitMode     = 'contain',
 }) {
   const canvasRef    = useRef(null);
   // Always-current mirrors of the latest prop values — safe to read in async
@@ -87,7 +92,7 @@ export default function SkeletonOverlay({
     };
     angles.forEach((ja) => {
       const color    = QUALITY_COLOR[ja.quality] || QUALITY_COLOR.UNCLASSIFIED;
-      const vidxIdx  = IDX[ja.landmark_b];
+      const vidxIdx  = IDX[ja.landmarkB];
       if (vidxIdx !== undefined) map.set(vidxIdx, { color, ...ja });
     });
     return map;
@@ -105,19 +110,32 @@ export default function SkeletonOverlay({
 
     if (!lms || lms.length === 0) return;
 
-    // ── Compute cover-mode render rect ──────────────────────────────────────
-    // Read the source dimensions LIVE from the video element every frame.
-    // This guarantees we always have the real videoWidth/videoHeight even if
-    // the camera changed resolution or the component just mounted.
+    // ── Compute media render rect ───────────────────────────────────────────
+    // Read source dimensions live from either the <img> or <video> element.
     const video = videoRef?.current;
-    const srcW  = (video?.videoWidth  > 0 ? video.videoWidth  : 640);
-    const srcH  = (video?.videoHeight > 0 ? video.videoHeight : 480);
+    const img   = imgRef?.current;
 
-    // object-fit: cover  →  scale = max(cw/srcW, ch/srcH)
-    const scale   = Math.max(cw / srcW, ch / srcH);
+    let srcW = 640;
+    let srcH = 480;
+
+    if (img && (img.naturalWidth > 0 || img.width > 0)) {
+      srcW = img.naturalWidth || img.width;
+      srcH = img.naturalHeight || img.height;
+    } else if (video && (video.videoWidth > 0 || video.width > 0)) {
+      srcW = video.videoWidth || video.width;
+      srcH = video.videoHeight || video.height;
+    }
+
+    // 'contain' scales down/up so the ENTIRE video/image frame fits without cropping
+    // 'cover' scales so the video fills the canvas, cropping excess
+    const isContain = fitMode !== 'cover';
+    const scale = isContain
+      ? Math.min(cw / srcW, ch / srcH)
+      : Math.max(cw / srcW, ch / srcH);
+
     const renderW = srcW * scale;
     const renderH = srcH * scale;
-    const offsetX = (cw - renderW) / 2;   // negative when source is wider → cropped
+    const offsetX = (cw - renderW) / 2;
     const offsetY = (ch - renderH) / 2;
 
     // Landmark normalized [0,1] → canvas pixel
@@ -194,7 +212,7 @@ export default function SkeletonOverlay({
       };
 
       angles.forEach((ja) => {
-        const vidxIdx = LABEL_IDX[ja.landmark_b];
+        const vidxIdx = LABEL_IDX[ja.landmarkB];
         if (vidxIdx === undefined) return;
         const lm = lms[vidxIdx];
         if (!lm || (lm.visibility ?? 1) < 0.4) return;
@@ -202,7 +220,7 @@ export default function SkeletonOverlay({
         const x     = px(lm);
         const y     = py(lm);
         const color = QUALITY_COLOR[ja.quality] || QUALITY_COLOR.UNCLASSIFIED;
-        const label = `${ja.angle_degrees?.toFixed(0)}°`;
+        const label = `${ja.angleDegrees?.toFixed(0)}°`;
 
         const tw = ctx.measureText(label).width + 10;
         ctx.fillStyle = 'rgba(7, 11, 20, 0.75)';
@@ -214,7 +232,24 @@ export default function SkeletonOverlay({
         ctx.fillText(label, x, y - 9);
       });
     }
-  }, [videoRef, showAngles, buildJointColorMap]);
+  }, [videoRef, imgRef, showAngles, fitMode, buildJointColorMap]);
+
+  // ── Listen for video metadata / image load to redraw when dimensions become ready
+  useEffect(() => {
+    const video = videoRef?.current;
+    if (!video) return;
+    const handleMeta = () => draw(landmarksRef.current, anglesRef.current);
+    video.addEventListener('loadedmetadata', handleMeta);
+    return () => video.removeEventListener('loadedmetadata', handleMeta);
+  }, [videoRef, draw]);
+
+  useEffect(() => {
+    const img = imgRef?.current;
+    if (!img) return;
+    const handleLoad = () => draw(landmarksRef.current, anglesRef.current);
+    img.addEventListener('load', handleLoad);
+    return () => img.removeEventListener('load', handleLoad);
+  }, [imgRef, draw]);
 
   // ── ResizeObserver: keep canvas px size == CSS rendered size ─────────────
   // Without this, canvas.width defaults to 300 and all coords are wrong.
@@ -241,10 +276,10 @@ export default function SkeletonOverlay({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draw]);
 
-  // ── Redraw on every landmark update ──────────────────────────────────────
+  // ── Redraw on every landmark or fitMode update ───────────────────────────
   useEffect(() => {
     draw(landmarks, jointAngles);
-  }, [landmarks, jointAngles, draw]);
+  }, [landmarks, jointAngles, fitMode, draw]);
 
   return (
     <canvas

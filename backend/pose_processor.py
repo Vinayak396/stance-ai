@@ -202,7 +202,7 @@ class PoseProcessor:
         h, w = frame.shape[:2]
         lms = results.pose_landmarks.landmark
 
-        # Draw bones
+        # Draw bones    
         for (a, b) in _POSE_CONNECTIONS:
             if lms[a].visibility < 0.3 or lms[b].visibility < 0.3:
                 continue
