@@ -47,6 +47,8 @@ pnpm-debug.log*
 *.png
 *.gif
 *.webp
+*.pptx
+generate_presentation.py
 # Exceptions: public assets and SVG icons are OK
 !public/**/*.png
 !public/**/*.jpg
